@@ -1,0 +1,21 @@
+services:
+
+
+
+
+
+  extract :
+    build: .
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      FILE_SEARCH_PATH: "/data:/app/src" 
+
+    restart : unless-stopped
+
+    volumes:
+    - ./src:/app/src
+    - ./data:/data
+
+    command: ["sleep","infinity"]
+
+

@@ -1,0 +1,13 @@
+# lxml
+# pdfminer.six
+# aspose-words
+# pypandoc
+
+# spire.doc
+
+# python-docx
+
+gdown
+
+google-genai
+python-dotenv
