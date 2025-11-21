@@ -15,6 +15,7 @@ services:
     volumes:
     - ./src:/app/src
     - ./data:/data
+    - ./service_account.json:/app/service_account.json:ro
 
     command: ["sleep","infinity"]
 
