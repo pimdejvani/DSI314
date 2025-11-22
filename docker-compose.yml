@@ -3,12 +3,15 @@ services:
 
 
 
-
   extract :
-    build: .
+    build :
+      context: .
+      dockerfile: Dockerfile.extract
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       FILE_SEARCH_PATH: "/data:/app/src" 
+      ROOT_FOLDER_ID: ${ROOT_FOLDER_ID}
+      SPREADSHEET_ID: ${SPREADSHEET_ID}
 
     restart : unless-stopped
 
@@ -19,4 +22,18 @@ services:
 
     command: ["sleep","infinity"]
 
+
+  web:
+      build:    
+        context: .
+        dockerfile: Dockerfile.web
+      ports:
+        - "8501:8501"
+      volumes:
+        - ./web:/app          
+        - ./service_account.json:/app/service_account.json:ro
+      environment:
+        GEMINI_API_KEY: ${GEMINI_API_KEY}
+        ROOT_FOLDER_ID: ${ROOT_FOLDER_ID}
+        SPREADSHEET_ID: ${SPREADSHEET_ID}
 
