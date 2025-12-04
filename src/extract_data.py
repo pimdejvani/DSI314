@@ -420,6 +420,24 @@ def combine_course_items_for_row(
     combined = list(unique_map.values()) + no_code_items
     return combined
 
+def update_already_extract_flag(row_idx: int, value: int = 1) -> None:
+    """
+    อัปเดตค่า already_extract ในชีทต้นทาง
+    row_idx = เลขแถวจริงใน Google Sheet (3,4,5,...)
+    template ใหม่เริ่มที่ B2:
+    B:faculty, C:degree, D:curriculum, E:docx id, F:pdf id,
+    G:chunk1_start, H:chunk1_end, I:chunk2_start, J:chunk2_end,
+    K:chunk3_start, L:chunk3_end, M:chunk4_start, N:chunk4_end,
+    O:already_extract, P:finish_info, Q:finish_course, R:DONE
+    """
+    cell_range = f"{SHEET_NAME}!O{row_idx}"  # O = already_extract
+
+    service_spread.values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=cell_range,
+        valueInputOption="RAW",
+        body={"values": [[str(value)]]},
+    ).execute()
 
 
 # ================= PROMPT & SCHEMA =================
@@ -473,7 +491,7 @@ schema_chunk1 = {
 content_chunk2 = """จากในไฟล์ที่ทำการ extract ค่อนข้างเรียงจากบนลงล่าง อย่าลืมสองหน้าแรก
 max_semester ระยะเวลาการศึกษาสูงสุด จาก ระบบการจัดการศึกษาและระยะเวลาการศึกษา (เอามาเฉพาะค่าที่ถูกเลือกและเอามาแค่เลข) day_class วัน-เวลาในการดำเนินการเรียนการสอน จาก การดำเนินการหลักสูตร (เอามาเฉพาะค่าที่ถูกเลือก หากมีหลายค่าให้ใช้ ,) type_class ระบบการศึกษา จาก การดำเนินการหลักสูตร (เอามาเฉพาะค่าที่ถูกเลือก หากมีหลายค่าให้ใช้ ,)
 #'หากหลักสูตรมีหลายรูปแบบให้เลือก เลือกรูปแบบแรก' total_credits จำนวนหน่วยกิตรวม จาก หลักสูตร ใน โครงสร้างหลักสูตร รายวิชา และหน่วยกิต (เอามาแค่ค่าผลรวม) gen_ed_credits จำนวนหน่วยกิตรวม 'วิชาศึกษาทั่วไป' จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม) spec_credits จำนวนหน่วยกิตรวม 'วิชาเฉพาะ' จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม)  elec_credits จำนวนหน่วยกิตรวม วิชาเลือก/วิชาโท/วิชาภาคปฏิบัติ (ปล.อาจมีความต่างเล็กน้อย บางครั้งก็ไม่มี หรืออาจมีแค่คำเดียวจากในนี้) จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม)  free_elec_credits จำนวนหน่วยกิตรวม 'วิชาเลือกเสรี' จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม) โดยทั้ง 4 ตัว เมื่อดูที่หัวข้อนั้นอยู่ระกับเดียวกัน เช่น หัวข้อ 1 ,2 ,3 ,4
-course_type_id ประเภทของวิชาหลัก (จะเป็นคำว่า 'วิชาศึกษาทั่วไป', 'วิชาเฉพาะ' ,'วิชาเลือกเสรี' หรือ 'วิชาเลือก หรือ วิชาโท หรือ วิชาโท/วิชาภาคปฏิบัติ/ศึกษาค้นคว้าด้วยตนเอง' โดยอาจต้องเลื่อนขึ้นไปดูข้างบนอยู่บ้าง)  ,th_abv ชื่อและรหัสวิชา ย่อ ภาษาไทย ,eng_abv ชื่อและรหัสวิชา ย่อ ภาษาอังกฤษ
+course_type_id ประเภทของวิชาหลัก (จะเป็นคำว่า 'วิชาศึกษาทั่วไป', 'วิชาเฉพาะ' ,'วิชาเลือกเสรี' หรือ 'วิชาเลือก หรือ วิชาโท หรือ วิชาโท/วิชาภาคปฏิบัติ/ศึกษาค้นคว้าด้วยตนเอง' โดยอาจต้องเลื่อนขึ้นไปดูข้างบนอยู่บ้าง)  ,th_abv รหัสวิชาย่อ ภาษาไทย ,eng_abv รหัสวิชาย่อ ภาษาอังกฤษ
 """
 
 schema_chunk2 = {
@@ -494,7 +512,9 @@ schema_chunk2 = {
                 "properties": {
                     "course_type_id": {"type": "STRING", "nullable": True},
                     "th_abv": {"type": "STRING", "nullable": True},
+                    # "th_name": {"type": "STRING", "nullable": True},
                     "eng_abv": {"type": "STRING", "nullable": True},
+                    # "eng_name": {"type": "STRING", "nullable": True},
 
                 },
                 "required": [],
@@ -615,37 +635,50 @@ def main():
     rows = read_rows_from_sheet()
     print("rows", rows)
 
-    # 2) header ของชีทปลายทาง
+    # 2) header ของชีทปลายทาง (ทุกชีทคอลัมน์แรกอยู่ที่ B2)
     info_headers = get_sheet_headers("information")
     plo_headers = get_sheet_headers("plo")
     course_headers = get_sheet_headers("course")
     qual_headers = get_sheet_headers("qualification_responsible")
 
     # 3) loop ทีละแถว (1 แถว = 1 หลักสูตร)
-    for row_idx, row in enumerate(rows, start=3):  # row_idx = แถวจริงในชีท
+    for row_idx, row in enumerate(rows, start=3):  # row_idx = แถวจริงในชีท (header อยู่ที่แถว 2)
         print("row_idx", row_idx)
+
+        # ---------- (1) เลือกเฉพาะแถวที่ already_extract == 0 ----------
+        already = str(row.get("already_extract", "")).strip()
+        if already != "0":
+            # ถ้าไม่ใช่ 0 แปลว่าเคย extract แล้ว -> ข้าม
+            continue
+
         pdf_id = row.get("pdf id") or row.get("PDF_ID") or ""
+        if not pdf_id:
+            # ไม่มี pdf id ก็ข้าม
+            continue
 
         PAGE_START_CHUNKS: Dict[int, Optional[int]] = {
-            1: to_int_or_none(row.get("start1")),
-            2: to_int_or_none(row.get("start2")),
-            3: to_int_or_none(row.get("start3")),
-            4: to_int_or_none(row.get("start4")),
+            1: to_int_or_none(row.get("chunk1_start")),
+            2: to_int_or_none(row.get("chunk2_start")),
+            3: to_int_or_none(row.get("chunk3_start")),
+            4: to_int_or_none(row.get("chunk4_start")),
         }
         PAGE_END_CHUNKS: Dict[int, Optional[int]] = {
-            1: to_int_or_none(row.get("end1")),
-            2: to_int_or_none(row.get("end2")),
-            3: to_int_or_none(row.get("end3")),
-            4: to_int_or_none(row.get("end4")),
+            1: to_int_or_none(row.get("chunk1_end")),
+            2: to_int_or_none(row.get("chunk2_end")),
+            3: to_int_or_none(row.get("chunk3_end")),
+            4: to_int_or_none(row.get("chunk4_end")),
         }
-
-        if not pdf_id:
-            continue
 
         print(f"\n========== ROW {row_idx} pdf_id={pdf_id} ==========\n")
 
-        # scalar fields chunk1,2,4 -> information
+        # ---------- scalar fields chunk1,2,4 -> information ----------
         info_data: Dict[str, Any] = {}
+
+        # (2) map field จาก template -> sheet information ตามที่ต้องการ
+        info_data["curriculum"] = row.get("curriculum", "")
+        info_data["docx id"] = row.get("docx id", "")
+        info_data["pdf id"] = pdf_id
+        info_data["faculty"] = row.get("faculty", "")
 
         # buffer สำหรับแต่ละชนิดในแถวนี้
         plo_values_for_row: List[List[Any]] = []
@@ -687,7 +720,7 @@ def main():
                             continue
                         row_values = make_row_from_item(
                             headers=plo_headers,
-                            base_row=row,
+                            base_row=row,  # มี curriculum/docx id/pdf id อยู่ -> map ไปชีท plo ได้ถ้ามี header ชื่อนี้
                             item=plo_item,
                             extra={"row_index": row_idx, "row_idx": row_idx},
                         )
@@ -730,7 +763,7 @@ def main():
                             continue
                         row_values = make_row_from_item(
                             headers=qual_headers,
-                            base_row=row,
+                            base_row=row,  # ใช้ base_row เพื่อ map curriculum/docx id/pdf id เช่นกัน
                             item=q,
                             extra={"row_index": row_idx, "row_idx": row_idx},
                         )
@@ -738,7 +771,8 @@ def main():
 
         # ===== หลังจากครบ 4 chunk ของแถวนี้ =====
         print(info_data)
-        # information
+
+        # information: เขียนแถว row_idx (ครั้งแรกเท่านั้น เพราะรอบต่อไปโดนกรอง already_extract)
         write_information_row(row_idx, info_headers, info_data)
 
         # plo (append เฉพาะของแถวนี้)
@@ -756,7 +790,7 @@ def main():
             for item in combined_courses:
                 row_values = make_row_from_item(
                     headers=course_headers,
-                    base_row=row,
+                    base_row=row,  # map curriculum/docx id/pdf id ไปด้วย
                     item=item,
                     extra={"row_index": row_idx, "row_idx": row_idx},
                 )
@@ -772,6 +806,10 @@ def main():
                 qual_headers,
                 qual_values_for_row,
             )
+
+        # ---------- (3) mark ว่าแถวนี้ extract เสร็จแล้ว ----------
+        update_already_extract_flag(row_idx, 1)
+
 
 
 if __name__ == "__main__":

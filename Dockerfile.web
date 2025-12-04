@@ -3,7 +3,7 @@ WORKDIR /app
 
 
 COPY requirements_web.txt .
-RUN pip install -r requirements_web.txt --no-cache-dir
+RUN pip install --no-cache-dir -r requirements_web.txt
 
 COPY web/ web/
 

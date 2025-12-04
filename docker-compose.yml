@@ -19,7 +19,7 @@ services:
     - ./src:/app/src
     - ./data:/data
     - ./service_account.json:/app/service_account.json:ro
-
+    - .:/app
     command: ["sleep","infinity"]
 
 

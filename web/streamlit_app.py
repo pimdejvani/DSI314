@@ -1,9 +1,12 @@
 import os
+import io
 
 import pandas as pd
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 import streamlit as st
+from streamlit_pdf_viewer import pdf_viewer
 
 # ================== CONFIG & GOOGLE CLIENTS ==================
 
@@ -21,7 +24,8 @@ SHEET_NAME = "information"  # ใช้ sheet 'information'
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = "gemini-2.5-flash"
 
-# ความสูงของ PDF และกรอบฟอร์ม (px)
+
+# ความสูงของ PDF และกรอบฟอร์ม (px) – ตอนใช้ st.pdf() จะไม่เป๊ะ 800px แต่ตัว viewer จะปรับเอง
 PDF_HEIGHT = 800
 
 # สร้าง credentials และ client
@@ -29,6 +33,7 @@ creds = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES
 )
 service_spread = build("sheets", "v4", credentials=creds).spreadsheets()
+service_drive = build("drive", "v3", credentials=creds)  # ✅ เพิ่ม Drive client
 
 
 # ================== DATA LAYER: READ SHEET ==================
@@ -74,28 +79,24 @@ def load_curriculum_data() -> pd.DataFrame:
     return df
 
 
-# ================== PDF VIEWER (GOOGLE DRIVE PREVIEW) ==================
+# ================== DATA LAYER: DOWNLOAD PDF FROM DRIVE ==================
 
-def drive_preview_iframe(pdf_id: str, height: int) -> str:
+@st.cache_data(show_spinner=True)
+def download_pdf_bytes(file_id: str) -> bytes:
     """
-    ฝัง PDF โดยใช้ Google Drive preview โดยตรง
-    ต้องตั้งสิทธิ์ไฟล์ใน Drive เป็น 'Anyone with the link - Viewer'
-    """
-    pdf_id = (pdf_id or "").strip()
-    if not pdf_id:
-        return "<p style='color:red;'>ไม่มี pdf id</p>"
+    ดาวน์โหลดไฟล์ PDF จาก Google Drive (ด้วย service account)
+    แล้วคืนค่าเป็น bytes สำหรับใช้กับ st.pdf()
 
-    url = f"https://drive.google.com/file/d/{pdf_id}/preview"
-
-    return f"""
-    <iframe
-        src="{url}"
-        width="100%"
-        height="{height}"
-        allow="autoplay"
-        style="border: 1px solid #ddd; border-radius: 4px;"
-    ></iframe>
+    หมายเหตุ: ต้องแชร์ไฟล์ใน Drive ให้ service account ตัวนี้มีสิทธิ์อย่างน้อย Viewer
     """
+    request = service_drive.files().get_media(fileId=file_id)
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+        # จะไม่ print progress เพื่อไม่รก log
+    return fh.getvalue()
 
 
 # ================== STREAMLIT UI ==================
@@ -186,6 +187,7 @@ if search_clicked:
 st.markdown("---")
 
 # ========== ถ้ายังไม่กดค้นหา แสดงแค่ส่วน search แล้วจบ ==========
+
 if not st.session_state.has_searched:
     st.info("กรุณาเลือก faculty และ degree_full_th แล้วกดปุ่ม 'ค้นหา'")
     st.stop()
@@ -223,8 +225,6 @@ st.markdown("---")
 
 left_col, right_col = st.columns([3, 7])
 
-
-
 # ทำให้ฟอร์ม (qa_form) เป็นกล่องที่เลื่อนในตัวเอง สูงประมาณ 600px
 BOX_HEIGHT = 700  # px
 
@@ -244,16 +244,29 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 # ------------------ ด้านซ้าย: PDF ------------------
 with left_col:
     st.subheader("📄 PDF หลักสูตร")
 
-    pdf_id = (pdf_id or "").strip()
-    if not pdf_id:
-        st.warning("ไม่มีค่า 'pdf id' ในแถวนี้")
+    if pdf_id:
+        try:
+            pdf_bytes = download_pdf_bytes(pdf_id)
+
+            # 👇 ใช้ streamlit-pdf-viewer แทน st.pdf
+            pdf_viewer(
+                input=pdf_bytes,      # ใช้ bytes จาก Google Drive API
+                width="100%",         # หรือจะใส่เป็น 800 ก็ได้
+                height=PDF_HEIGHT,    # ใช้ค่าที่คุณตั้งไว้ด้านบน
+                render_text=True,     # ⭐ สำคัญมาก: ทำให้คลุม+Ctrl+C ได้
+                key="pdf_viewer_main",
+            )
+
+        except Exception as e:
+            st.error(f"โหลด PDF ไม่สำเร็จ: {e}")
     else:
-        iframe_html = drive_preview_iframe(pdf_id, height=PDF_HEIGHT)
-        st.markdown(iframe_html, unsafe_allow_html=True)
+        st.warning("ไม่มี pdf id")
+
 
 
 # ------------------ ด้านขวา: กล่องเลื่อน + ช่องแก้ไขข้อความจาก data จริง ------------------
@@ -314,13 +327,11 @@ with right_col:
 
             # label สวย ๆ ให้ดูง่าย
             st.markdown(f"**{col_name}**")
-
-            # ช่องแก้ข้อความ (เติมค่าจาก columns ไว้ก่อน)
-            # ถ้าเนื้อหายาวมากจะใช้ text_area แทน text_input ก็ได้
             new_value = st.text_input(
-                label="",
+                label=col_name,
                 value=original_value,
                 key=f"edit_{col_name}",
+                label_visibility="collapsed",
             )
 
             edited_values[col_name] = new_value
@@ -341,6 +352,6 @@ with right_col:
             }
         )
 
-    # ปุ่มบันทึกอยู่ด้านล่างกล่อง (ไม่เลื่อนตาม เน้นกดง่าย)
+    # ปุ่มบันทึกอยู่นอก form (ถ้าต้องการอีกปุ่ม)
     if st.button("💾 บันทึก", use_container_width=True):
         st.success("บันทึก (ตัวอย่าง) – ยังไม่ได้เขียนกลับ Google Sheet จริง")
