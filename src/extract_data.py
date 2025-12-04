@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import re
 import os
 import json
 from io import BytesIO
@@ -307,6 +307,57 @@ def append_rows_to_sheet(
     ).execute()
 from typing import List, Dict, Any, Optional
 
+def normalize_course_abv(code: Any, lang: str) -> str:
+    """
+    ทำความสะอาดรหัสวิชาให้เป็นรูปแบบ:
+      LETTERS DIGITS
+    - ลบ space และจุดออกก่อน
+    - ถ้ามีตัวอักษรต่อท้ายหลังตัวเลข จะทิ้งไป
+    lang = "th" หรือ "en"
+    """
+    if code is None:
+        return ""
+    s = str(code)
+
+    # ลบ space ทั่วไป, non-breaking space, และจุด
+    s = s.replace(" ", "").replace("\u00A0", "").replace(".", "")
+
+    if not s:
+        return ""
+
+    # pattern: ตัวอักษร + ตัวเลข (ไม่สนว่ามีอะไรต่อท้าย)
+    if lang == "th":
+        # ตัวอักษรไทย + อังกฤษ เผื่อกรณีปนกัน
+        pattern = r"^([\u0E00-\u0E7Fa-zA-Z]+)(\d+)"
+    else:
+        # อังกฤษล้วน
+        pattern = r"^([A-Za-z]+)(\d+)"
+
+    m = re.match(pattern, s)
+    if not m:
+        # ถ้าจับ pattern ไม่ได้ ก็คืนค่าที่ล้างแล้วเฉย ๆ
+        return s
+
+    letters, digits = m.group(1), m.group(2)
+    return f"{letters} {digits}"
+
+
+def normalize_course_item_abv(item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    รับ dict ของรายวิชา 1 ตัว
+    - แก้รูปแบบ th_abv และ eng_abv ตามกติกา
+    - คืน dict ตัวเดิม (แก้ในที่เดิม)
+    """
+    if not isinstance(item, dict):
+        return item
+
+    if "th_abv" in item and item["th_abv"]:
+        item["th_abv"] = normalize_course_abv(item["th_abv"], "th")
+
+    if "eng_abv" in item and item["eng_abv"]:
+        item["eng_abv"] = normalize_course_abv(item["eng_abv"], "en")
+
+    return item
 
 def normalize_course_code(val: Any) -> str:
     """
@@ -738,6 +789,8 @@ def main():
                 if isinstance(c_list, list):
                     for c in c_list:
                         if isinstance(c, dict):
+                            # ✅ normalize th_abv / eng_abv ก่อนเก็บ
+                            normalize_course_item_abv(c)
                             chunk2_courses.append(c)
 
             elif chunk_no == 3:
@@ -746,6 +799,8 @@ def main():
                 if isinstance(c_list, list):
                     for c in c_list:
                         if isinstance(c, dict):
+                            # ✅ normalize th_abv / eng_abv ก่อนเก็บ
+                            normalize_course_item_abv(c)
                             chunk3_courses.append(c)
 
             elif chunk_no == 4:
