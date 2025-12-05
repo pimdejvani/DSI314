@@ -611,7 +611,7 @@ def main():
     print("ตัวอย่าง df.head():")
     print(df.head())
 
-    df.to_csv("curriculum_files.csv", index=False, encoding="utf-8-sig")
+    df = df.to_csv("curriculum_files.csv", index=False, encoding="utf-8-sig")
     print("✅ บันทึกไฟล์ curriculum_files.csv แล้ว")
 
     write_df_to_sheet(df)

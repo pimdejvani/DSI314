@@ -19,7 +19,6 @@ services:
     - ./src:/app/src
     - ./data:/data
     - ./service_account.json:/app/service_account.json:ro
-    - .:/app
     command: ["sleep","infinity"]
 
 
@@ -30,10 +29,12 @@ services:
       ports:
         - "8501:8501"
       volumes:
-        - ./web:/app          
+        - ./web:/app/web      
         - ./service_account.json:/app/service_account.json:ro
       environment:
         GEMINI_API_KEY: ${GEMINI_API_KEY}
         ROOT_FOLDER_ID: ${ROOT_FOLDER_ID}
         SPREADSHEET_ID: ${SPREADSHEET_ID}
+      command: ["streamlit", "run", "/app/web/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+
 

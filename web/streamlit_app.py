@@ -12,6 +12,22 @@ from streamlit_pdf_viewer import pdf_viewer
 
 st.set_page_config(page_title="Curriculum QA Tool", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    /* ถ้าอยากปรับ "ขนาดขอบ" หน้าเว็บ ให้แก้ตัวเลขที่นี่ */
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 1rem;
+        padding-left: 3rem;   /* 👈 ลด/เพิ่มขอบซ้าย */
+        padding-right: 3rem;  /* 👈 ลด/เพิ่มขอบขวา */
+        max-width: 100%;        /* 👈 ให้เนื้อหากว้างเต็ม */
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 SERVICE_ACCOUNT_FILE = "service_account.json"
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
@@ -34,6 +50,28 @@ creds = service_account.Credentials.from_service_account_file(
 )
 service_spread = build("sheets", "v4", credentials=creds).spreadsheets()
 service_drive = build("drive", "v3", credentials=creds)  # ✅ เพิ่ม Drive client
+
+# ================== PDF VIEWER (GOOGLE DRIVE PREVIEW) ==================
+def drive_preview_iframe(pdf_id: str, height: int) -> str:
+    """
+    ฝัง PDF โดยใช้ Google Drive preview โดยตรง
+    ต้องตั้งสิทธิ์ไฟล์ใน Drive เป็น 'Anyone with the link - Viewer'
+    """
+    pdf_id = (pdf_id or "").strip()
+    if not pdf_id:
+        return "<p style='color:red;'>ไม่มี pdf id</p>"
+
+    url = f"https://drive.google.com/file/d/{pdf_id}/preview"
+
+    return f"""
+    <iframe
+        src="{url}"
+        width="100%"
+        height="{height}"
+        allow="autoplay"
+        style="border: 1px solid #ddd; border-radius: 4px;"
+    ></iframe>
+    """
 
 
 # ================== DATA LAYER: READ SHEET ==================
@@ -208,42 +246,20 @@ if filtered.empty:
 
 row = filtered.iloc[0]
 pdf_id = row.get("pdf id", "")
+record_id = row.get("curr_id", f"{active_fac}_{active_deg}")
 
 # ===== แสดงสรุปผลการค้นหา =====
-st.subheader("ผลการค้นหา")
 st.markdown(
     f"""
-**คณะ (faculty):** {active_fac}  
-**ชื่อหลักสูตร (degree_full_th):** {active_deg}  
-**pdf id:** `{pdf_id}`
+**ผลการค้นหา pdf id:** `{pdf_id}`
 """
 )
 
 st.markdown("---")
 
-# ================== LAYOUT 30:70 ==================
+# ================== LAYOUT 40:60 ==================
 
-left_col, right_col = st.columns([3, 7])
-
-# ทำให้ฟอร์ม (qa_form) เป็นกล่องที่เลื่อนในตัวเอง สูงประมาณ 600px
-BOX_HEIGHT = 700  # px
-
-st.markdown(
-    f"""
-    <style>
-    /* Streamlit ใช้ div[data-testid="stForm"] ไม่ใช่ form */
-    div[data-testid="stForm"] {{
-        max-height: {BOX_HEIGHT}px !important;
-        overflow-y: auto !important;
-        padding: 12px;
-        border: 1px solid #ddd;
-        border-radius: 6px;
-        background-color: #fafafa;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+left_col, right_col = st.columns([4, 6])
 
 # ------------------ ด้านซ้าย: PDF ------------------
 with left_col:
@@ -267,11 +283,9 @@ with left_col:
     else:
         st.warning("ไม่มี pdf id")
 
-
-
-# ------------------ ด้านขวา: กล่องเลื่อน + ช่องแก้ไขข้อความจาก data จริง ------------------
+# ------------------ ด้านขวา: ฟอร์มในกล่องเลื่อน ------------------
 with right_col:
-    st.subheader("📝 ข้อมูลหลักสูตร")
+    st.subheader("📝 ข้อมูลหลักสูตร (แก้ไขได้ในกล่องเลื่อน)")
 
     FIELD_COLUMNS = [
         "curr_id",
@@ -312,46 +326,50 @@ with right_col:
         "curr_qa",
     ]
 
-    # ใช้ form เพื่อให้มีปุ่มบันทึกด้านล่าง และ form ทั้งหมดจะอยู่ใน "กล่องเลื่อน"
-    with st.form("qa_form"):
-        edited_values = {}
+    TEXTAREA_HEIGHT = 100  # สูงประมาณ 4–5 บรรทัดต่อช่อง
+    BOX_HEIGHT = 700       # ความสูงของ "กล่องเลื่อน" ฝั่งขวา
 
-        for col_name in FIELD_COLUMNS:
-            if col_name not in df.columns:
-                continue
+    # 👇 กล่องเลื่อนจริง ๆ อยู่ตรงนี้
+    scroll_box = st.container(height=BOX_HEIGHT, border=True)
 
-            original_value = row.get(col_name, "")
-            if original_value is None:
-                original_value = ""
-            original_value = str(original_value)
+    # 👇 ทำให้ form มี key ผูกกับหลักสูตร
+    form_key = f"qa_form_{record_id}"
 
-            # label สวย ๆ ให้ดูง่าย
-            st.markdown(f"**{col_name}**")
-            new_value = st.text_input(
-                label=col_name,
-                value=original_value,
-                key=f"edit_{col_name}",
-                label_visibility="collapsed",
+    with scroll_box:
+        with st.form(form_key):
+            edited_values = {}
+
+            for col_name in FIELD_COLUMNS:
+                if col_name not in df.columns:
+                    continue
+
+                original_value = row.get(col_name, "")
+                if original_value is None:
+                    original_value = ""
+                original_value = str(original_value)
+
+                # 👇 key ของ text_area ผูกกับหลักสูตร + ชื่อคอลัมน์
+                widget_key = f"edit_{record_id}_{col_name}"
+
+                new_value = st.text_area(
+                    label=col_name,
+                    value=original_value,
+                    key=widget_key,
+                    height=TEXTAREA_HEIGHT,
+                )
+
+                edited_values[col_name] = new_value
+                st.markdown("---")
+
+            submit = st.form_submit_button("💾 บันทึกการแก้ไข", use_container_width=True)
+
+        if submit:
+            st.success("บันทึก (ตัวอย่าง) – ยังไม่ได้เขียนกลับ Google Sheet จริง")
+            st.json(
+                {
+                    "faculty": active_fac,
+                    "degree_full_th": active_deg,
+                    "pdf_id": pdf_id,
+                    "edited_values": edited_values,
+                }
             )
-
-            edited_values[col_name] = new_value
-
-            st.markdown("---")
-
-        # ปุ่มบันทึกอยู่ "ด้านล่างสุดของกล่องเลื่อน" (ใน form เดียวกัน)
-        submit = st.form_submit_button("💾 บันทึกการแก้ไข", use_container_width=True)
-
-    if submit:
-        st.success("บันทึก (ตัวอย่าง) – ยังไม่ได้เขียนกลับ Google Sheet จริง")
-        st.json(
-            {
-                "faculty": active_fac,
-                "degree_full_th": active_deg,
-                "pdf_id": pdf_id,
-                "edited_values": edited_values,
-            }
-        )
-
-    # ปุ่มบันทึกอยู่นอก form (ถ้าต้องการอีกปุ่ม)
-    if st.button("💾 บันทึก", use_container_width=True):
-        st.success("บันทึก (ตัวอย่าง) – ยังไม่ได้เขียนกลับ Google Sheet จริง")
