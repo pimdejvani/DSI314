@@ -23,18 +23,27 @@ services:
 
 
   web:
-      build:    
-        context: .
-        dockerfile: Dockerfile.web
-      ports:
-        - "8501:8501"
-      volumes:
-        - ./web:/app/web      
-        - ./service_account.json:/app/service_account.json:ro
-      environment:
-        GEMINI_API_KEY: ${GEMINI_API_KEY}
-        ROOT_FOLDER_ID: ${ROOT_FOLDER_ID}
-        SPREADSHEET_ID: ${SPREADSHEET_ID}
-      command: ["streamlit", "run", "/app/web/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "8501:8501"
+    volumes:
+      # โค้ดบนเครื่อง -> ใน container (อัปเดตโค้ดแล้ว container เห็นทันที)
+      - ./web:/app/web
+      # service account (อ่านอย่างเดียว)
+      - ./service_account.json:/app/service_account.json:ro
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      ROOT_FOLDER_ID: ${ROOT_FOLDER_ID}
+      SPREADSHEET_ID: ${SPREADSHEET_ID}
 
-
+      # 👇 สำคัญ: ให้ Streamlit เช็คไฟล์แบบ polling ใน Docker
+      STREAMLIT_SERVER_FILE_WATCHER_TYPE: "poll"
+      STREAMLIT_SERVER_RUN_ON_SAVE: "true"
+    command:
+      - "streamlit"
+      - "run"
+      - "/app/web/streamlit_app.py"
+      - "--server.address=0.0.0.0"
+      - "--server.port=8501"
