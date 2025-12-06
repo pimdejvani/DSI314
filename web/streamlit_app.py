@@ -80,6 +80,55 @@ def drive_preview_iframe(pdf_id: str, height: int) -> str:
     ></iframe>
     """
 
+def editable_field(
+    label: str,
+    value: str,
+    key_prefix: str,
+    is_text_area: bool = False,
+    height: int | None = None,
+    default_update: bool = False,
+):
+    """
+    แสดง label + checkbox 'แก้ไข' อยู่บรรทัดเดียวกัน
+    แล้วค่อยตามด้วย input / textarea อีกบรรทัด
+
+    return: (new_value, want_update)
+    """
+    with st.container():
+        # แถวบน: ชื่อฟิลด์ + checkbox แก้ไข
+        hcol, ccol = st.columns([5, 1])
+
+        with hcol:
+            st.markdown(f"**{label}**")
+
+        with ccol:
+            want_update = st.checkbox(
+                "แก้ไข",
+                key=f"{key_prefix}_edit",
+                value=default_update,
+                help="ติ๊กถ้าต้องการให้เขียนทับฟิลด์นี้กลับไปที่ Google Sheet",
+            )
+
+        # แถวล่าง: กล่องกรอกค่า
+        if is_text_area:
+            new_val = st.text_area(
+                label=label,                     # 👈 มี label จริง
+                value=value,
+                key=f"{key_prefix}_val",
+                height=height,
+                label_visibility="collapsed",    # 👈 ซ่อนออกจาก UI
+            )
+        else:
+            new_val = st.text_input(
+                label=label,                     # 👈 มี label จริง
+                value=value,
+                key=f"{key_prefix}_val",
+                label_visibility="collapsed",    # 👈 ซ่อนออกจาก UI
+            )
+
+    return new_val, want_update
+
+
 
 # ================== DATA LAYER: READ SHEET ==================
 
@@ -545,24 +594,32 @@ with right_col:
 
                     original_value = str(row.get(col_name, "") or "")
 
+                    key_prefix = f"{record_id}_info_{col_name}"
+
                     if col_name in LONG_TEXT_COLUMNS:
-                        widget_key = f"edit_ta_{record_id}_{col_name}"
-                        with st.container():
-                            new_value = st.text_area(
-                                col_name,
-                                value=original_value,
-                                key=widget_key,
-                                height=TEXTAREA_HEIGHT,
-                            )
-                    else:
-                        widget_key = f"edit_tx_{record_id}_{col_name}"
-                        new_value = st.text_input(
-                            col_name,
+                        new_value, want_update = editable_field(
+                            label=col_name,
                             value=original_value,
-                            key=widget_key,
+                            key_prefix=key_prefix,
+                            is_text_area=True,
+                            height=TEXTAREA_HEIGHT,
+                            default_update=False,  # 👈 ของเดิมใน DB -> ยังไม่แก้
+                        )
+                    else:
+                        new_value, want_update = editable_field(
+                            label=col_name,
+                            value=original_value,
+                            key_prefix=key_prefix,
+                            is_text_area=False,
+                            default_update=False,
                         )
 
-                    edited_info[col_name] = new_value
+                    # เก็บทั้ง value + flag ว่าจะแก้ไหม
+                    edited_info[col_name] = {
+                        "value": new_value,
+                        "update": want_update,
+                    }
+
                     st.markdown("---")
 
                     # ==== แทรก PLO หลัง qualification_collegian ====
@@ -589,21 +646,27 @@ with right_col:
                                     with st.container(border=True):
                                         st.markdown(f"**PLO เดิม #{i+1}**")
 
-                                        type_val = st.text_input(
-                                            "type_plo",
+                                        type_val, type_update = editable_field(
+                                            label="type_plo",
                                             value=str(plo_row.get("type_plo", "")),
-                                            key=f"{record_id}_plo_{i}_type",
+                                            key_prefix=f"{record_id}_plo_{i}_type",
+                                            default_update=False,   # ของเดิม -> ยังไม่แก้
                                         )
-                                        num_val = st.text_input(
-                                            "num_plo",
+
+                                        num_val, num_update = editable_field(
+                                            label="num_plo",
                                             value=str(plo_row.get("num_plo", "")),
-                                            key=f"{record_id}_plo_{i}_num",
+                                            key_prefix=f"{record_id}_plo_{i}_num",
+                                            default_update=False,
                                         )
-                                        detail_val = st.text_area(
-                                            "detail_plo",
+
+                                        detail_val, detail_update = editable_field(
+                                            label="detail_plo",
                                             value=str(plo_row.get("detail_plo", "")),
-                                            key=f"{record_id}_plo_{i}_detail",
+                                            key_prefix=f"{record_id}_plo_{i}_detail",
+                                            is_text_area=True,
                                             height=TEXTAREA_HEIGHT,
+                                            default_update=False,
                                         )
 
                                         delete_flag = st.checkbox(
@@ -616,13 +679,20 @@ with right_col:
                                             {
                                                 "orig_index": int(plo_row["index"]),
                                                 "curriculum": curriculum_key,
+
                                                 "type_plo": type_val,
                                                 "num_plo": num_val,
                                                 "detail_plo": detail_val,
+
+                                                "type_plo_update": type_update,
+                                                "num_plo_update": num_update,
+                                                "detail_plo_update": detail_update,
+
                                                 "is_new": False,
                                                 "delete": delete_flag,
                                             }
                                         )
+
                                         st.markdown("---")
 
                             # ===== PLO ใหม่ =====
@@ -633,34 +703,47 @@ with right_col:
                                 with st.container(border=True):
                                     st.markdown(f"**PLO ใหม่ #{j+1}**")
 
-                                    type_val = st.text_input(
-                                        "type_plo (ใหม่)",
+                                    type_val, type_update = editable_field(
+                                        label="type_plo (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_plo_new_{j}_type",
+                                        key_prefix=f"{record_id}_plo_new_{j}_type",
+                                        default_update=True,  # 👈 กล่องใหม่ -> แก้ เป็น default
                                     )
-                                    num_val = st.text_input(
-                                        "num_plo (ใหม่)",
+
+                                    num_val, num_update = editable_field(
+                                        label="num_plo (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_plo_new_{j}_num",
+                                        key_prefix=f"{record_id}_plo_new_{j}_num",
+                                        default_update=True,
                                     )
-                                    detail_val = st.text_area(
-                                        "detail_plo (ใหม่)",
+
+                                    detail_val, detail_update = editable_field(
+                                        label="detail_plo (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_plo_new_{j}_detail",
+                                        key_prefix=f"{record_id}_plo_new_{j}_detail",
+                                        is_text_area=True,
                                         height=TEXTAREA_HEIGHT,
+                                        default_update=True,
                                     )
 
                                     edited_plo.append(
                                         {
                                             "orig_index": None,
                                             "curriculum": curriculum_key,
+
                                             "type_plo": type_val,
                                             "num_plo": num_val,
                                             "detail_plo": detail_val,
+
+                                            "type_plo_update": type_update,
+                                            "num_plo_update": num_update,
+                                            "detail_plo_update": detail_update,
+
                                             "is_new": True,
                                             "delete": False,
                                         }
                                     )
+
                                     st.markdown("---")
 
                         plo_inserted = True
@@ -690,35 +773,46 @@ with right_col:
                                     with st.container(border=True):
                                         st.markdown(f"**ผู้รับผิดชอบเดิม #{i+1}**")
 
-                                        qual_val = st.text_input(
+                                        qual_val, qual_update = editable_field(
                                             "qualification_responsible",
                                             value=str(q_row.get("qualification_responsible", "")),
-                                            key=f"{record_id}_qual_{i}_qualification",
+                                            key_prefix=f"{record_id}_qual_{i}_qualification",
+                                            default_update=False,
                                         )
-                                        name_val = st.text_input(
+
+                                        name_val, name_update = editable_field(
                                             "name_responsible",
                                             value=str(q_row.get("name_responsible", "")),
-                                            key=f"{record_id}_qual_{i}_name",
+                                            key_prefix=f"{record_id}_qual_{i}_name",
+                                            default_update=False,
                                         )
-                                        degree_val = st.text_input(
-                                            "degree_reponsible",
+
+                                        degree_val, degree_update = editable_field(
+                                            "degree_reponsible",   # 👈 ให้ตรงชื่อคอลัมน์ในชีต
                                             value=str(q_row.get("degree_reponsible", "")),
-                                            key=f"{record_id}_qual_{i}_degree",
+                                            key_prefix=f"{record_id}_qual_{i}_degree",
+                                            default_update=False,
                                         )
-                                        program_val = st.text_input(
+
+                                        program_val, program_update = editable_field(
                                             "program_responsible",
                                             value=str(q_row.get("program_responsible", "")),
-                                            key=f"{record_id}_qual_{i}_program",
+                                            key_prefix=f"{record_id}_qual_{i}_program",
+                                            default_update=False,
                                         )
-                                        inst_val = st.text_input(
-                                            "institute_responsible",
+
+                                        inst_val, inst_update = editable_field(
+                                            "institute_responsible",   # 👈 ใช้ชื่อคอลัมน์จริง
                                             value=str(q_row.get("institute_responsible", "")),
-                                            key=f"{record_id}_qual_{i}_institute",
+                                            key_prefix=f"{record_id}_qual_{i}_institute",
+                                            default_update=False,
                                         )
-                                        year_val = st.text_input(
-                                            "year_graduate_responsible",
+
+                                        year_val, year_update = editable_field(
+                                            "year_graduate_responsible",  # 👈 ใช้ชื่อคอลัมน์จริง
                                             value=str(q_row.get("year_graduate_responsible", "")),
-                                            key=f"{record_id}_qual_{i}_year",
+                                            key_prefix=f"{record_id}_qual_{i}_year",
+                                            default_update=False,
                                         )
 
                                         delete_flag = st.checkbox(
@@ -731,17 +825,27 @@ with right_col:
                                             {
                                                 "orig_index": int(q_row["index"]),
                                                 "curriculum": curriculum_key,
+
                                                 "qualification_responsible": qual_val,
                                                 "name_responsible": name_val,
                                                 "degree_reponsible": degree_val,
                                                 "program_responsible": program_val,
                                                 "institute_responsible": inst_val,
                                                 "year_graduate_responsible": year_val,
+
+                                                "qualification_responsible_update": qual_update,
+                                                "name_responsible_update": name_update,
+                                                "degree_reponsible_update": degree_update,
+                                                "program_responsible_update": program_update,
+                                                "institute_responsible_update": inst_update,
+                                                "year_graduate_responsible_update": year_update,
+
                                                 "is_new": False,
                                                 "delete": delete_flag,
                                             }
                                         )
                                         st.markdown("---")
+
 
                             # ===== ผู้รับผิดชอบใหม่ =====
                             if new_qual_count > 0:
@@ -751,52 +855,73 @@ with right_col:
                                 with st.container(border=True):
                                     st.markdown(f"**ผู้รับผิดชอบใหม่ #{j+1}**")
 
-                                    qual_val = st.text_input(
+                                    qual_val, qual_update = editable_field(
                                         "qualification_responsible (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_qual_new_{j}_qualification",
+                                        key_prefix=f"{record_id}_qual_new_{j}_qualification",
+                                        default_update=True,   # กล่องใหม่ -> ติ๊ก "แก้ไข" ไว้ให้
                                     )
-                                    name_val = st.text_input(
+
+                                    name_val, name_update = editable_field(
                                         "name_responsible (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_qual_new_{j}_name",
+                                        key_prefix=f"{record_id}_qual_new_{j}_name",
+                                        default_update=True,
                                     )
-                                    degree_val = st.text_input(
+
+                                    degree_val, degree_update = editable_field(
                                         "degree_reponsible (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_qual_new_{j}_degree",
+                                        key_prefix=f"{record_id}_qual_new_{j}_degree",
+                                        default_update=True,
                                     )
-                                    program_val = st.text_input(
+
+                                    program_val, program_update = editable_field(
                                         "program_responsible (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_qual_new_{j}_program",
+                                        key_prefix=f"{record_id}_qual_new_{j}_program",
+                                        default_update=True,
                                     )
-                                    inst_val = st.text_input(
+
+                                    inst_val, inst_update = editable_field(
                                         "institute_responsible (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_qual_new_{j}_institute",
+                                        key_prefix=f"{record_id}_qual_new_{j}_institute",
+                                        default_update=True,
                                     )
-                                    year_val = st.text_input(
+
+                                    year_val, year_update = editable_field(
                                         "year_graduate_responsible (ใหม่)",
                                         value="",
-                                        key=f"{record_id}_qual_new_{j}_year",
+                                        key_prefix=f"{record_id}_qual_new_{j}_year",
+                                        default_update=True,
                                     )
 
                                     edited_qual.append(
                                         {
                                             "orig_index": None,
                                             "curriculum": curriculum_key,
+
                                             "qualification_responsible": qual_val,
                                             "name_responsible": name_val,
                                             "degree_reponsible": degree_val,
                                             "program_responsible": program_val,
                                             "institute_responsible": inst_val,
                                             "year_graduate_responsible": year_val,
+
+                                            "qualification_responsible_update": qual_update,
+                                            "name_responsible_update": name_update,
+                                            "degree_reponsible_update": degree_update,
+                                            "program_responsible_update": program_update,
+                                            "institute_responsible_update": inst_update,
+                                            "year_graduate_responsible_update": year_update,
+
                                             "is_new": True,
                                             "delete": False,
                                         }
                                     )
                                     st.markdown("---")
+
 
                         qual_inserted = True
 
@@ -896,13 +1021,22 @@ with right_col:
                         continue
 
                     original_value = str(row.get(col_name, "") or "")
-                    widget_key = f"course_info_{record_id}_{col_name}"
 
-                    edited_course_info[col_name] = st.text_input(
+                    key_prefix = f"{record_id}_course_info_{col_name}"
+
+                    # ใช้ editable_field เพื่อมีปุ่ม "แก้ไข" เหมือนฟิลด์อื่น ๆ
+                    new_val, want_update = editable_field(
                         label=col_name,
                         value=original_value,
-                        key=widget_key,
+                        key_prefix=key_prefix,
+                        is_text_area=False,
+                        default_update=False,   # ของเดิมในชีต -> ยังไม่แก้เป็นค่าเริ่มต้น
                     )
+
+                    edited_course_info[col_name] = {
+                        "value": new_val,
+                        "update": want_update,
+                    }
 
                 st.markdown("---")
 
@@ -949,14 +1083,14 @@ with right_col:
                                 "curriculum": curriculum_key,
                             }
 
-                            # ----- จัดการ course_type_id แบบปุ่มกด 4 ตัว -----
+                            # ----- จัดการ course_type_id แบบปุ่มกด 4 ตัว + ปุ่มแก้ไข -----
                             original_type = str(c_row.get("course_type_id", "") or "").strip()
 
                             type_options = [
                                 "วิชาศึกษาทั่วไป",
                                 "วิชาเฉพาะ",
-                                "วิชาเลือกเสรี",
                                 "อื่นๆ",
+                                "วิชาเลือกเสรี",
                             ]
 
                             if original_type in STANDARD_TYPES:
@@ -964,13 +1098,25 @@ with right_col:
                             else:
                                 default_choice = "อื่นๆ"
 
-                            type_choice = st.radio(
-                                "ประเภทวิชา (course_type_id)",
-                                options=type_options,
-                                index=type_options.index(default_choice),
-                                horizontal=True,
-                                key=f"{record_id}_course_{i}_course_type_id_radio",
-                            )
+                            # radio + checkbox อยู่คนละ column
+                            rcol, ecol = st.columns([4, 1])
+
+                            with rcol:
+                                type_choice = st.radio(
+                                    "ประเภทวิชา (course_type_id)",
+                                    options=type_options,
+                                    index=type_options.index(default_choice),
+                                    horizontal=True,
+                                    key=f"{record_id}_course_{i}_course_type_id_radio",
+                                )
+
+                            with ecol:
+                                course_type_update = st.checkbox(
+                                    "แก้ไข",
+                                    key=f"{record_id}_course_{i}_course_type_id_edit",
+                                    value=False,  # รายวิชาเดิม -> ยังไม่แก้ เป็น default
+                                    help="ติ๊กถ้าต้องการให้เขียนทับค่า course_type_id กลับฐานข้อมูล",
+                                )
 
                             if original_type and original_type not in STANDARD_TYPES:
                                 st.caption(f"ค่าเดิมในชีต: {original_type}")
@@ -986,6 +1132,8 @@ with right_col:
                             edited_one["course_type_id"] = final_type
                             edited_one["course_type_id_choice"] = type_choice
                             edited_one["course_type_id_original"] = original_type
+                            edited_one["course_type_id_update"] = course_type_update  # 👈 flag สำหรับเขียนกลับ
+
 
                             # ----- ฟิลด์อื่น ๆ ของรายวิชา -----
                             fields = [
@@ -1004,23 +1152,21 @@ with right_col:
 
                             for field in fields:
                                 val = str(c_row.get(field, "") or "")
-                                key = f"{record_id}_course_{i}_{field}"
+                                key_prefix = f"{record_id}_course_{i}_{field}"
 
-                                if field in ("th_desc", "eng_desc", "prerequisite"):
-                                    new_val = st.text_area(
-                                        field,
-                                        value=val,
-                                        key=key,
-                                        height=TEXTAREA_HEIGHT,
-                                    )
-                                else:
-                                    new_val = st.text_input(
-                                        field,
-                                        value=val,
-                                        key=key,
-                                    )
+                                is_ta = field in ("th_desc", "eng_desc", "prerequisite")
+
+                                new_val, update_flag = editable_field(
+                                    label=field,
+                                    value=val,
+                                    key_prefix=key_prefix,
+                                    is_text_area=is_ta,
+                                    height=TEXTAREA_HEIGHT if is_ta else None,
+                                    default_update=False,   # ของเดิม
+                                )
 
                                 edited_one[field] = new_val
+                                edited_one[f"{field}_update"] = update_flag
 
                             # 👇 checkbox สำหรับลบรายวิชาเดิม
                             delete_flag = st.checkbox(
@@ -1048,21 +1194,32 @@ with right_col:
                             "curriculum": curriculum_key,
                         }
 
-                        # --- เลือกประเภทวิชาเหมือนเดิม ---
+                        # --- เลือกประเภทวิชาเหมือนเดิม + ปุ่มแก้ไข ---
                         type_options = [
                             "วิชาศึกษาทั่วไป",
                             "วิชาเฉพาะ",
-                            "วิชาเลือกเสรี",
                             "อื่นๆ",
+                            "วิชาเลือกเสรี",
                         ]
 
-                        type_choice = st.radio(
-                            "ประเภทวิชา (course_type_id) (ใหม่)",
-                            options=type_options,
-                            index=1,  # default เช่น "วิชาเฉพาะ"
-                            horizontal=True,
-                            key=f"{record_id}_course_new_{j}_course_type_id_radio",
-                        )
+                        rcol, ecol = st.columns([4, 1])
+
+                        with rcol:
+                            type_choice = st.radio(
+                                "ประเภทวิชา (course_type_id) (ใหม่)",
+                                options=type_options,
+                                index=1,  # default เช่น "วิชาเฉพาะ"
+                                horizontal=True,
+                                key=f"{record_id}_course_new_{j}_course_type_id_radio",
+                            )
+
+                        with ecol:
+                            course_type_update = st.checkbox(
+                                "แก้ไข",
+                                key=f"{record_id}_course_new_{j}_course_type_id_edit",
+                                value=True,   # 👈 รายวิชาใหม่ -> แก้ เป็น default
+                                help="ติ๊กถ้าต้องการบันทึก course_type_id ของวิชาใหม่นี้",
+                            )
 
                         if type_choice == "อื่นๆ":
                             if other_type_label.strip():
@@ -1075,6 +1232,8 @@ with right_col:
                         new_course["course_type_id"] = final_type
                         new_course["course_type_id_choice"] = type_choice
                         new_course["course_type_id_original"] = ""
+                        new_course["course_type_id_update"] = course_type_update
+
 
                         # --- ฟิลด์อื่นของรายวิชาใหม่ ---
                         fields = [
@@ -1092,23 +1251,21 @@ with right_col:
                         ]
 
                         for field in fields:
-                            key = f"{record_id}_course_new_{j}_{field}"
+                            key_prefix = f"{record_id}_course_new_{j}_{field}"
+                            is_ta = field in ("th_desc", "eng_desc", "prerequisite")
 
-                            if field in ("th_desc", "eng_desc", "prerequisite"):
-                                val = st.text_area(
-                                    field + " (ใหม่)",
-                                    value="",
-                                    key=key,
-                                    height=TEXTAREA_HEIGHT,
-                                )
-                            else:
-                                val = st.text_input(
-                                    field + " (ใหม่)",
-                                    value="",
-                                    key=key,
-                                )
+                            val, update_flag = editable_field(
+                                label=field + " (ใหม่)",
+                                value="",
+                                key_prefix=key_prefix,
+                                is_text_area=is_ta,
+                                height=TEXTAREA_HEIGHT if is_ta else None,
+                                default_update=True,  # 👈 กล่องใหม่ ติ๊ก "แก้ไข" ให้เลย
+                            )
 
                             new_course[field] = val
+                            new_course[f"{field}_update"] = update_flag
+
 
                         new_course["is_new"] = True
                         new_course["delete"] = False
