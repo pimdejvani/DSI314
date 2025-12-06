@@ -132,7 +132,6 @@ def editable_field(
 
 # ================== DATA LAYER: READ SHEET ==================
 
-@st.cache_data(show_spinner=True)
 def load_curriculum_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         st.error("ไม่ได้ตั้งค่า SPREADSHEET_ID ใน environment variable")
@@ -166,7 +165,6 @@ def load_curriculum_data() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=True)
 def load_plo_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         return pd.DataFrame()
@@ -198,7 +196,6 @@ def load_plo_data() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=True)
 def load_qualification_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         return pd.DataFrame()
@@ -230,7 +227,6 @@ def load_qualification_data() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=True)
 def load_course_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         return pd.DataFrame()
@@ -543,7 +539,7 @@ with right_col:
             "criteria_graduate",
         }
 
-        # ---------- เตรียมตัวนับ PLO / Qualification ใหม่ (ไม่มีปุ่มที่นี่) ----------
+        # ---------- เตรียมตัวนับ PLO / Qualification ใหม่ ----------
         plo_count_key = f"new_plo_count_{record_id}"
         if plo_count_key not in st.session_state:
             st.session_state[plo_count_key] = 0
@@ -553,6 +549,20 @@ with right_col:
         if qual_count_key not in st.session_state:
             st.session_state[qual_count_key] = 0
         new_qual_count = int(st.session_state[qual_count_key])
+
+        # 👉 callback สำหรับปุ่มเพิ่ม/ล้าง
+        def inc_plo():
+            st.session_state[plo_count_key] = int(st.session_state.get(plo_count_key, 0)) + 1
+
+        def clear_plo():
+            st.session_state[plo_count_key] = 0
+
+        def inc_qual():
+            st.session_state[qual_count_key] = int(st.session_state.get(qual_count_key, 0)) + 1
+
+        def clear_qual():
+            st.session_state[qual_count_key] = 0
+
 
         # ---------- ฟอร์มหลัก ----------
         form_key = f"qa_form_{record_id}_info"
@@ -931,11 +941,13 @@ with right_col:
                 add_plo_btn = st.form_submit_button(
                     "➕ เพิ่ม PLO ใหม่",
                     use_container_width=True,
+                    on_click=inc_plo,   # 👈 สำคัญ
                 )
             with ctrl_col2:
                 clear_plo_btn = st.form_submit_button(
                     "🗑️ ล้าง PLO ใหม่",
                     use_container_width=True,
+                    on_click=clear_plo,  # 👈 สำคัญ
                 )
 
             qctrl1, qctrl2 = st.columns(2)
@@ -943,11 +955,13 @@ with right_col:
                 add_qual_btn = st.form_submit_button(
                     "➕ เพิ่มผู้รับผิดชอบใหม่",
                     use_container_width=True,
+                    on_click=inc_qual,  # 👈 สำคัญ
                 )
             with qctrl2:
                 clear_qual_btn = st.form_submit_button(
                     "🗑️ ล้างผู้รับผิดชอบใหม่",
                     use_container_width=True,
+                    on_click=clear_qual,  # 👈 สำคัญ
                 )
 
             submit_info = st.form_submit_button(
@@ -955,16 +969,6 @@ with right_col:
                 use_container_width=True,
             )
 
-        # ===== จัดการผลลัพธ์ของปุ่มต่าง ๆ นอก form =====
-        if add_plo_btn:
-            st.session_state[plo_count_key] = new_plo_count + 1
-        if clear_plo_btn:
-            st.session_state[plo_count_key] = 0
-
-        if add_qual_btn:
-            st.session_state[qual_count_key] = new_qual_count + 1
-        if clear_qual_btn:
-            st.session_state[qual_count_key] = 0
 
         if submit_info:
             st.success("บันทึก (ตัวอย่าง – โหมด information, ยังไม่ได้เขียนกลับ Google Sheet จริง)")
@@ -983,7 +987,6 @@ with right_col:
 
 
 
-
     elif x2_mode == "course":
         st.subheader("📚 ข้อมูลรายวิชา (Course)")
 
@@ -993,6 +996,13 @@ with right_col:
             st.session_state[course_count_key] = 0
 
         new_course_count = int(st.session_state[course_count_key])
+
+        # 👉 callback สำหรับปุ่มเพิ่ม/ล้างรายวิชาใหม่
+        def inc_course():
+            st.session_state[course_count_key] = int(st.session_state.get(course_count_key, 0)) + 1
+
+        def clear_course():
+            st.session_state[course_count_key] = 0
 
         # ---------- ฟอร์มหลักของโหมด course ----------
         form_key = f"qa_form_{record_id}_course"
@@ -1024,7 +1034,6 @@ with right_col:
 
                     key_prefix = f"{record_id}_course_info_{col_name}"
 
-                    # ใช้ editable_field เพื่อมีปุ่ม "แก้ไข" เหมือนฟิลด์อื่น ๆ
                     new_val, want_update = editable_field(
                         label=col_name,
                         value=original_value,
@@ -1040,16 +1049,44 @@ with right_col:
 
                 st.markdown("---")
 
+                # ==== เตรียม DataFrame รายวิชาในหลักสูตรนี้ ====
+                course_rows = pd.DataFrame()
+                if curriculum_key and not course_df.empty and "curriculum" in course_df.columns:
+                    mask_course = (
+                        course_df["curriculum"].astype(str).str.strip()
+                        == str(curriculum_key).strip()
+                    )
+                    course_rows = course_df[mask_course].reset_index(drop=False)
+
                 # ==== ฟอร์มพิเศษสำหรับกำหนดชื่อประเภทของ "อื่นๆ" ====
                 STANDARD_TYPES = ["วิชาศึกษาทั่วไป", "วิชาเฉพาะ", "วิชาเลือกเสรี"]
 
+                # หา unique course_type_id ที่ไม่ใช่ STANDARD_TYPES และไม่ว่าง
+                default_other_type = ""
+                if not course_rows.empty and "course_type_id" in course_rows.columns:
+                    type_series = course_rows["course_type_id"].astype(str).str.strip()
+                    other_candidates = sorted(
+                        {
+                            t
+                            for t in type_series
+                            if t and t not in STANDARD_TYPES
+                        }
+                    )
+                    if other_candidates:
+                        # เลือกสักตัวมาเป็น default
+                        default_other_type = other_candidates[0]
+
+                other_key = f"course_other_type_{record_id}"
+                if other_key not in st.session_state:
+                    st.session_state[other_key] = default_other_type
+
                 other_type_label = st.text_input(
                     "ชื่อประเภทวิชาที่ต้องการใช้แทนค่าที่เลือกเป็น 'อื่นๆ'",
-                    value="",
-                    key=f"course_other_type_{record_id}",
+                    key=other_key,
                     help=(
-                        "ถ้าวิชาไหนคุณเลือกเป็น 'อื่นๆ' ระบบจะใช้ข้อความนี้เป็นค่า "
-                        "course_type_id ใหม่เวลาเซฟ (ถ้าปล่อยว่างจะใช้ค่าเดิมในชีต)"
+                        "ถ้าวิชาไหนคุณเลือกเป็น 'อื่นๆ' และกรอกค่านี้ "
+                        "ระบบจะใช้ข้อความนี้เป็นค่า course_type_id ใหม่เวลาเซฟ "
+                        "(ถ้าปล่อยว่างจะใช้ค่าเดิมในชีตหรือค่าว่าง)"
                     ),
                 )
 
@@ -1059,14 +1096,6 @@ with right_col:
                 st.markdown("### 📚 รายวิชาทั้งหมดในหลักสูตรนี้")
 
                 edited_course_list = []
-
-                course_rows = pd.DataFrame()
-                if curriculum_key and not course_df.empty and "curriculum" in course_df.columns:
-                    mask_course = (
-                        course_df["curriculum"].astype(str).str.strip()
-                        == str(curriculum_key).strip()
-                    )
-                    course_rows = course_df[mask_course].reset_index(drop=False)
 
                 # ===== รายวิชาเดิม =====
                 if course_rows.empty:
@@ -1093,6 +1122,7 @@ with right_col:
                                 "วิชาเลือกเสรี",
                             ]
 
+                            # ถ้าไม่ใช่ type มาตรฐาน (หรือว่าง) -> radio default เป็น "อื่นๆ"
                             if original_type in STANDARD_TYPES:
                                 default_choice = original_type
                             else:
@@ -1110,30 +1140,37 @@ with right_col:
                                     key=f"{record_id}_course_{i}_course_type_id_radio",
                                 )
 
+                            # คำนวณค่าใหม่ final_type จาก radio + other_type_label
+                            if type_choice == "อื่นๆ":
+                                if other_type_label.strip():
+                                    # ถ้ามี label -> ใช้ label เป็นค่าใหม่ (รวมทุกแถวที่เป็น "อื่นๆ")
+                                    final_type = other_type_label.strip()
+                                else:
+                                    # ไม่มี label -> ใช้ค่าเดิม (อาจว่าง/null หรือค่าอื่น ๆ)
+                                    final_type = original_type
+                            else:
+                                # เลือกเป็นค่ามาตรฐาน
+                                final_type = type_choice
+
+                            # ถ้าค่าใหม่ไม่เท่าค่าเดิม -> default ให้ติ๊ก "แก้ไข"
+                            default_update_flag = (final_type != original_type)
+
                             with ecol:
                                 course_type_update = st.checkbox(
                                     "แก้ไข",
                                     key=f"{record_id}_course_{i}_course_type_id_edit",
-                                    value=False,  # รายวิชาเดิม -> ยังไม่แก้ เป็น default
+                                    value=default_update_flag,
                                     help="ติ๊กถ้าต้องการให้เขียนทับค่า course_type_id กลับฐานข้อมูล",
                                 )
 
+                            # แสดงค่าเดิมถ้าไม่ใช่ type มาตรฐาน เผื่อให้ user เห็นว่าเดิมเป็นอะไร
                             if original_type and original_type not in STANDARD_TYPES:
                                 st.caption(f"ค่าเดิมในชีต: {original_type}")
-
-                            if type_choice == "อื่นๆ":
-                                if other_type_label.strip():
-                                    final_type = other_type_label.strip()
-                                else:
-                                    final_type = original_type
-                            else:
-                                final_type = type_choice
 
                             edited_one["course_type_id"] = final_type
                             edited_one["course_type_id_choice"] = type_choice
                             edited_one["course_type_id_original"] = original_type
-                            edited_one["course_type_id_update"] = course_type_update  # 👈 flag สำหรับเขียนกลับ
-
+                            edited_one["course_type_id_update"] = course_type_update  # flag สำหรับเขียนกลับ
 
                             # ----- ฟิลด์อื่น ๆ ของรายวิชา -----
                             fields = [
@@ -1217,7 +1254,7 @@ with right_col:
                             course_type_update = st.checkbox(
                                 "แก้ไข",
                                 key=f"{record_id}_course_new_{j}_course_type_id_edit",
-                                value=True,   # 👈 รายวิชาใหม่ -> แก้ เป็น default
+                                value=True,   # รายวิชาใหม่ -> แก้ เป็น default
                                 help="ติ๊กถ้าต้องการบันทึก course_type_id ของวิชาใหม่นี้",
                             )
 
@@ -1233,7 +1270,6 @@ with right_col:
                         new_course["course_type_id_choice"] = type_choice
                         new_course["course_type_id_original"] = ""
                         new_course["course_type_id_update"] = course_type_update
-
 
                         # --- ฟิลด์อื่นของรายวิชาใหม่ ---
                         fields = [
@@ -1260,12 +1296,11 @@ with right_col:
                                 key_prefix=key_prefix,
                                 is_text_area=is_ta,
                                 height=TEXTAREA_HEIGHT if is_ta else None,
-                                default_update=True,  # 👈 กล่องใหม่ ติ๊ก "แก้ไข" ให้เลย
+                                default_update=True,  # กล่องใหม่ ติ๊ก "แก้ไข" ให้เลย
                             )
 
                             new_course[field] = val
                             new_course[f"{field}_update"] = update_flag
-
 
                         new_course["is_new"] = True
                         new_course["delete"] = False
@@ -1278,23 +1313,19 @@ with right_col:
                 add_course_btn = st.form_submit_button(
                     "➕ เพิ่มรายวิชาใหม่",
                     use_container_width=True,
+                    on_click=inc_course,   # 👈
                 )
             with cctrl2:
                 clear_course_btn = st.form_submit_button(
                     "🗑️ ล้างรายวิชาใหม่",
                     use_container_width=True,
+                    on_click=clear_course,  # 👈
                 )
 
             submit_course = st.form_submit_button(
                 "💾 บันทึกการแก้ไขทั้งหมด",
                 use_container_width=True,
             )
-
-        # ===== จัดการผลลัพธ์ปุ่มต่าง ๆ นอก form =====
-        if add_course_btn:
-            st.session_state[course_count_key] = new_course_count + 1
-        if clear_course_btn:
-            st.session_state[course_count_key] = 0
 
         if submit_course:
             st.success("บันทึก (ตัวอย่าง) – โหมด course, ยังไม่ได้เขียนกลับ Google Sheet จริง")
@@ -1309,5 +1340,4 @@ with right_col:
                     "finish_course_new_value": 1,
                 }
             )
-
 
