@@ -826,7 +826,9 @@ def main():
 
         # ===== หลังจากครบ 4 chunk ของแถวนี้ =====
         print(info_data)
-
+        info_data.setdefault("finish_info", 0)
+        info_data.setdefault("finish_course", 0)
+        
         # information: เขียนแถว row_idx (ครั้งแรกเท่านั้น เพราะรอบต่อไปโดนกรอง already_extract)
         write_information_row(row_idx, info_headers, info_data)
 

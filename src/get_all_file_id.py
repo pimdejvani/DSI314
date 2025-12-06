@@ -483,8 +483,6 @@ def write_df_to_sheet(df: pd.DataFrame):
                 _num(row.get("chunk4_end")),        # N
 
                 0,                                  # O  already_extract
-                0,                                  # P  finish_info
-                0,                                  # Q  finish_course
                 0,                                  # R  DONE
             ]
         )
