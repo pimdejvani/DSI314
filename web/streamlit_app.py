@@ -1152,3 +1152,5 @@ with right_col:
                     "finish_course_new_value": 1,
                 }
             )
+
+
