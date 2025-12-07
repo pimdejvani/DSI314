@@ -28,6 +28,7 @@ services:
       dockerfile: Dockerfile.web
     ports:
       - "8501:8501"
+
     volumes:
       # โค้ดบนเครื่อง -> ใน container (อัปเดตโค้ดแล้ว container เห็นทันที)
       - ./web:/app/web

@@ -46,30 +46,24 @@ def download_pdf_pages(
     start_page: Optional[int] = None,
     end_page: Optional[int] = None,
 ) -> bytes:
-    """
-    โหลดไฟล์ PDF จาก Google Drive แล้วคืน bytes ของ PDF เฉพาะหน้าที่ต้องการ
-
-    - start_page / end_page ใช้เป็นเลขหน้าแบบ 1-based และ end_page เป็นแบบ 'รวมหน้า'
-      เช่น start_page=5, end_page=10 => เอาหน้า 5..10
-    - ถ้าไม่ส่ง start_page/end_page เลย -> คืนทั้งไฟล์
-    """
-    # 1) โหลดทั้งไฟล์จาก Drive
     request = service_drive.files().get_media(fileId=file_id)
     fh = BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
+
+    # เพิ่ม chunksize ให้ใหญ่ขึ้นลดโอกาสหลุด
+    downloader = MediaIoBaseDownload(fh, request, chunksize=1024 * 1024)
+
     done = False
     while not done:
-        _, done = downloader.next_chunk()
+        # ให้ตัวไลบรารี retry เอง
+        _, done = downloader.next_chunk(num_retries=5)
+
     pdf_bytes = fh.getvalue()
 
-    # ถ้าไม่ได้ระบุหน้าเลย -> คืนทั้งไฟล์
     if start_page is None and end_page is None:
         return pdf_bytes
 
-    # 2) อ่าน PDF แล้วตัดหน้า
     reader = PdfReader(BytesIO(pdf_bytes))
     writer = PdfWriter()
-
     total_pages = len(reader.pages)
 
     if start_page is None:
@@ -77,22 +71,21 @@ def download_pdf_pages(
     if end_page is None:
         end_page = total_pages
 
-    # clamp ให้อยู่ในช่วง
     start_page = max(1, start_page)
     end_page = min(total_pages, end_page)
 
     if start_page > end_page:
-        # ถ้าเพี้ยนมาก ให้คืน PDF ว่าง ๆ
         output = BytesIO()
         writer.write(output)
         return output.getvalue()
 
-    for page_num in range(start_page - 1, end_page):  # end_page รวม
+    for page_num in range(start_page - 1, end_page):
         writer.add_page(reader.pages[page_num])
 
     output = BytesIO()
     writer.write(output)
     return output.getvalue()
+
 
 
 def to_int_or_none(v):
@@ -137,22 +130,24 @@ def read_rows_from_sheet() -> list[dict[str, str]]:
     return rows_dicts
 
 
+
 def call_gemini_with_file_and_schema(
     file_bytes: bytes,
     prompt: str,
     schema: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    เรียก Gemini:
-    - แนบไฟล์ PDF (bytes)
-    - แนบ prompt (ข้อความ)
-    - บังคับ output ให้เป็น JSON ตาม schema
-    คืนค่า: JSON ที่ parse แล้วเป็น dict
-    """
+
     file_part = types.Part.from_bytes(
         data=file_bytes,
         mime_type="application/pdf",
     )
+    prompt_part = types.Part.from_text(text=prompt)
+
+    # ✅ แปลง schema เป็น object ถ้า SDK มีให้ใช้
+    schema_obj = schema
+    SchemaCls = getattr(types, "Schema", None)
+    if SchemaCls and hasattr(SchemaCls, "from_dict"):
+        schema_obj = SchemaCls.from_dict(schema)
 
     config = types.GenerateContentConfig(
         temperature=0.0,
@@ -161,9 +156,8 @@ def call_gemini_with_file_and_schema(
         candidate_count=1,
         presence_penalty=0.0,
         frequency_penalty=0.0,
-
         response_mime_type="application/json",
-        response_schema=schema,
+        response_schema=schema_obj,
         system_instruction=(
             """
             You are an information extraction engine.
@@ -182,26 +176,76 @@ def call_gemini_with_file_and_schema(
         ),
     )
 
-    # ปิดโหมด thinking ของ 2.5-flash (ถ้ารุ่นรองรับ)
     config.thinking_config = types.ThinkingConfig(thinking_budget=0)
 
     resp = client.models.generate_content(
         model=MODEL_NAME,
         contents=[
-            file_part,
-            prompt,
+            types.Content(
+                role="user",
+                parts=[prompt_part, file_part],
+            )
         ],
         config=config,
     )
 
+    # ---------- 1) ใช้ resp.parsed ก่อน ----------
+    parsed = getattr(resp, "parsed", None)
+    if parsed is not None:
+        return parsed
+
+    # ---------- 2) fallback: text + json.loads ----------
+    text = getattr(resp, "text", None)
+
+    if not text:
+        for cand in getattr(resp, "candidates", []) or []:
+            content = getattr(cand, "content", None)
+            if not content:
+                continue
+            for part in getattr(content, "parts", []) or []:
+                part_text = getattr(part, "text", None)
+                if part_text:
+                    text = part_text
+                    break
+            if text:
+                break
+
+    if not text:
+        print("⚠️ Gemini response has no text or parsed JSON:")
+        print(resp)
+        return {}
+
     try:
-        data = json.loads(resp.text)
+        return json.loads(text)
     except json.JSONDecodeError:
-        data = {"_raw": resp.text}
+        candidate = extract_json_object(text)
+        if candidate:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
 
-    return data
+        print("⚠️ JSON decode failed. Raw text from Gemini:")
+        print(text)
+        return {"_raw": text}
 
 
+
+
+def extract_json_object(text: str) -> Optional[str]:
+    if not text:
+        return None
+    # ตัด code fence เผื่อมี
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    # หา {...} ก้อนใหญ่สุดแบบง่าย ๆ
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start:end+1]
+    return None
 # ----------------- sheet utilities -----------------
 
 def col_index_to_letter(col_idx: int) -> str:
@@ -293,19 +337,54 @@ def append_rows_to_sheet(
     rows_values: List[List[Any]],
 ):
     """
-    append ข้อมูลลงชีทที่กำหนด (เช่น 'plo', 'qualification_responsible', 'course')
+    เขียน rows_values ต่อท้ายใน sheet ที่กำหนด โดย
+    - สมมติว่า header อยู่ที่แถว 2 (B2, C2, ...)
+    - เริ่มเขียนข้อมูลตั้งแต่คอลัมน์ B เสมอ
+    - ไม่ใช้ values.append แล้ว เพื่อเลี่ยงปัญหา table detection
     """
     if not rows_values:
         return
 
-    service_spread.values().append(
+    # ===== 1) คำนวณคอลัมน์เริ่ม / คอลัมน์สุดท้าย =====
+    start_col_idx = 2  # B
+    end_col_idx = start_col_idx + len(headers) - 1
+    end_col_letter = col_index_to_letter(end_col_idx)
+
+    # ===== 2) หาแถวสุดท้ายที่มีข้อมูลในคอลัมน์ B =====
+    # สมมติ header อยู่ที่ B2 ดังนั้นเราสแกน B2 ลงมา
+    scan_start_row = 2
+    col_b_range = f"{sheet_name}!B{scan_start_row}:B"
+
+    resp = service_spread.values().get(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"{sheet_name}!B3",
+        range=col_b_range,
+    ).execute()
+
+    existing = resp.get("values", [])
+
+    if existing:
+        # แถวสุดท้าย = แถวเริ่ม + (จำนวนแถวข้อมูล - 1)
+        last_row = scan_start_row + len(existing) - 1
+    else:
+        # ถ้าไม่มีอะไรเลยใน B2 ลงมา ให้ถือว่า last_row = แถว header
+        last_row = scan_start_row
+
+    # แถวถัดไปที่เราจะเริ่มเขียน (อย่างน้อยต้องไม่ต่ำกว่า 3)
+    next_row = max(last_row + 1, 3)
+
+    # จำนวนแถวที่เราจะเขียน
+    end_row = next_row + len(rows_values) - 1
+
+    target_range = f"{sheet_name}!B{next_row}:{end_col_letter}{end_row}"
+
+    # ===== 3) ใช้ update เขียนลง range เป๊ะ ๆ =====
+    service_spread.values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=target_range,
         valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
         body={"values": rows_values},
     ).execute()
-from typing import List, Dict, Any, Optional
+
 
 def normalize_course_abv(code: Any, lang: str) -> str:
     """
@@ -510,7 +589,7 @@ def update_already_extract_flag(row_idx: int, value: int = 1) -> None:
 
 # ================= PROMPT & SCHEMA =================
 
-content_chunk1 = """จากในไฟล์ที่ทำการ extract เรียงจากบนลงล่าง 
+content_chunk1 = """จากในไฟล์ที่ทำการ extract เรียงจากบนลงล่าง ห้ามตอบคำอธิบายอื่น ให้ตอบเป็น JSON อย่างเดียว ตาม schema ที่กำหนด
 หมวดที่ 1 จะมี  curr_id รหัสหลักสูตร curr_name_th ชื่อหลักสูตรภาษาไทย curr_name_en ชื่อหลักสูตรภาษาอังกฤษ	degree_full_th ชื่อปริญญาและสาขาวิชาภาษาไทยชื่อเต็ม degree_full_en ชื่อปริญญาและสาขาวิชาภาษาอังกฤษชื่อเต็ม degree_abr_th ชื่อปริญญาและสาขาวิชาภาษาไทยชื่อย่อ degree_abr_en ชื่อปริญญาและสาขาวิชาภาษาอังกฤษชื่อย่อ 
 curr_category_id รูปแบบ จาก รูปแบบของหลักสูตร หมวดที่เจอคำคล้ายๆว่า 'หลักสูตรระดับปริญญาตรี 4 ปี หรือต่อเนื่อง' (เอามาเฉพาะค่าที่ถูกเลือก) curr_type_id ประเภทของหลักสูตร จาก รูปแบบของหลักสูตร (เอามาเฉพาะค่าที่ถูกเลือก) lang_id ภาษาที่ใช้ จาก รูปแบบของหลักสูตร หมวดที่เจอคำคล้ายๆว่า 'จัดการศึกษาเป็นภาษาไทย' (เอามาเฉพาะค่าที่ถูกเลือก) mou ความร่วมมือกับสถาบันอื่น จาก รูปแบบของหลักสูตร เป็นหมวดที่เจอคำคล้ายๆว่า 'เป็นหลักสูตรของสถาบันโดยเฉพาะ'(เอามาเฉพาะค่าที่ถูกเลือก) first_open_semester สถานภาพของหลักสูตรและการพิจารณาอนุมัติ/เห็นชอบหลักสูตร จาก รูปแบบของหลักสูตร ให้เอาเลขภาคการศึกษาที่เปิดสอนมาใส่ first_open_year สถานภาพของหลักสูตรและการพิจารณาอนุมัติ/เห็นชอบหลักสูตร จาก รูปแบบของหลักสูตร ให้เอาเลขปีการศึกษาที่เปิดสอนมาใส่ 
 careers อาชีพที่สามารถประกอบได้หลังสำเร็จการศึกษา จาก รูปแบบของหลักสูตร (ไม่เอาลำดับข้อ หากมีหลายตัวอยากให้ใช้ ,) campus_id สถานที่จัดการเรียนการสอน จาก รูปแบบของหลักสูตร (เอามาเฉพาะค่าที่ถูกเลือก หากมีหลายตัวอยากให้ใช้ ,) expense_type ประเภทโครงการ จากประเภทโครงการ จากรูปแบบ 
@@ -556,7 +635,7 @@ schema_chunk1 = {
     "required": [],
 }
 
-content_chunk2 = """จากในไฟล์ที่ทำการ extract ค่อนข้างเรียงจากบนลงล่าง อย่าลืมสองหน้าแรก
+content_chunk2 = """จากในไฟล์ที่ทำการ extract ค่อนข้างเรียงจากบนลงล่าง อย่าลืมสองหน้าแรก ห้ามตอบคำอธิบายอื่น ให้ตอบเป็น JSON อย่างเดียว ตาม schema ที่กำหนด
 max_semester ระยะเวลาการศึกษาสูงสุด จาก ระบบการจัดการศึกษาและระยะเวลาการศึกษา (เอามาเฉพาะค่าที่ถูกเลือกและเอามาแค่เลข) day_class วัน-เวลาในการดำเนินการเรียนการสอน จาก การดำเนินการหลักสูตร (เอามาเฉพาะค่าที่ถูกเลือก หากมีหลายค่าให้ใช้ ,) type_class ระบบการศึกษา จาก การดำเนินการหลักสูตร (เอามาเฉพาะค่าที่ถูกเลือก หากมีหลายค่าให้ใช้ ,)
 #'หากหลักสูตรมีหลายรูปแบบให้เลือก เลือกรูปแบบแรก' total_credits จำนวนหน่วยกิตรวม จาก หลักสูตร ใน โครงสร้างหลักสูตร รายวิชา และหน่วยกิต (เอามาแค่ค่าผลรวม) gen_ed_credits จำนวนหน่วยกิตรวม 'วิชาศึกษาทั่วไป' จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม) spec_credits จำนวนหน่วยกิตรวม 'วิชาเฉพาะ' จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม)  elec_credits จำนวนหน่วยกิตรวม วิชาเลือก/วิชาโท/วิชาภาคปฏิบัติ (ปล.อาจมีความต่างเล็กน้อย บางครั้งก็ไม่มี หรืออาจมีแค่คำเดียวจากในนี้) จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม)  free_elec_credits จำนวนหน่วยกิตรวม 'วิชาเลือกเสรี' จาก หลักสูตร ใน โครงสร้างหลักสูตร (เอามาแค่ค่าผลรวม) โดยทั้ง 4 ตัว เมื่อดูที่หัวข้อนั้นอยู่ระกับเดียวกัน เช่น หัวข้อ 1 ,2 ,3 ,4
 course_type_id ประเภทของวิชาหลัก (จะเป็นคำว่า 'วิชาศึกษาทั่วไป', 'วิชาเฉพาะ' ,'วิชาเลือกเสรี' หรือ 'วิชาเลือก หรือ วิชาโท หรือ วิชาโท/วิชาภาคปฏิบัติ/ศึกษาค้นคว้าด้วยตนเอง' โดยอาจต้องเลื่อนขึ้นไปดูข้างบนอยู่บ้าง)  ,th_abv รหัสวิชาย่อ ภาษาไทย ,eng_abv รหัสวิชาย่อ ภาษาอังกฤษ
@@ -592,7 +671,7 @@ schema_chunk2 = {
     "required": [],
 }
 
-content_chunk3 = """ 
+content_chunk3 = """ ห้ามตอบคำอธิบายอื่น ให้ตอบเป็น JSON อย่างเดียว ตาม schema ที่กำหนด
 th_abv ชื่อรหัสวิชาย่อ ภาษาไทย ,th_name ชื่อวิชาเต็ม ภาษาไทย credit, lect_hours, practice_hours, self_hours 4 อันนี้มาจากหน่อวยกิตของแต่ละวิชา มีโครงสร้างเป็น 'credit (lect_hours-practice_hours-self_hours)' เช่น '3 (3-0-6)' ให้เอามาแค่เลข ,eng_abv ชื่อรหัสวิชาย่อ ภาษาอังกฤษ	,eng_name ชื่อวิชาเต็ม ภาษาอังกฤษ 
 ,th_desc คำอธิบายรายวิชาภาษาไทย (ไม่ต้องเอา วิชาบังคับก่อน มา) ,Prerequisite เอามาหากว่ามีชื่อรหัสวิชาภาษาอังกฤษมา นอกจากนั้นไม่เอา ไม่เอาเกณฑ์อื่น ,eng_desc คำอธิบายรายวิชาภาษาอังกฤษ (ไม่ต้องเอา Prerequisite มา) 
 """
@@ -608,9 +687,9 @@ schema_chunk3 = {
                     "th_abv": {"type": "STRING", "nullable": True},
                     "th_name": {"type": "STRING", "nullable": True},
                     "credit": {"type": "NUMBER", "nullable": True},
-                    "lect_hours": {"type": "NUMBER", "nullable": True},
-                    "practice_hours": {"type": "NUMBER", "nullable": True},
-                    "self_hours": {"type": "NUMBER", "nullable": True},
+                    "lect_hours": {"type": "INTEGER", "nullable": True},
+                    "practice_hours": {"type": "INTEGER", "nullable": True},
+                    "self_hours": {"type": "INTEGER", "nullable": True},
                     "eng_abv": {"type": "STRING", "nullable": True},
                     "eng_name": {"type": "STRING", "nullable": True},
                     "th_desc": {"type": "STRING", "nullable": True},
@@ -618,13 +697,17 @@ schema_chunk3 = {
                     "eng_desc": {"type": "STRING", "nullable": True},
                 },
                 "required": [],
+                # ถ้าเจอ error เรื่อง additionalProperties ค่อยลบบรรทัดนี้ทิ้ง
+                # "additionalProperties": False,
             },
         },
     },
-    "required": [],
+    "required": ["course"],
+    # ถ้าเจอ error เรื่อง additionalProperties ค่อยลบบรรทัดนี้ทิ้ง
+    # "additionalProperties": False,
 }
 
-content_chunk4 = """จากในไฟล์ที่ทำการ extract ค่อนข้างเรียงจากบนลงล่าง 
+content_chunk4 = """จากในไฟล์ที่ทำการ extract ค่อนข้างเรียงจากบนลงล่าง ห้ามตอบคำอธิบายอื่น ให้ตอบเป็น JSON อย่างเดียว ตาม schema ที่กำหนด
 หมวดที่ 6 count_research งานวิจัยหรือ บทความวิจัย (ชิ้น) จาก ด้านวิชาการ count_academic_paper ผลงานทางวิชาการอื่น ๆ จาก ด้านวิชาการ count_lecturer_academic จำนวนอาจารย์ประจำหลักสูตร (คน) จาก ด้านวิชาการ
 count_lecturer_full จำนวนอาจารย์ประจำไม่ว่าชนชาติใดรวม จาก ด้านการบริหารจัดการ (เอามาแค่เลข) count_lecturer_extra  จำนวนอาจารย์พิเศษรวม (เอามาแค่เลข) จาก ด้านการบริหารจัดการ count_staff จำนวนเจ้าหน้าที่ (เอามาแค่เลข) จาก ด้านการบริหารจัดการ
 qualification_responsible, name_responsible, degree_reponsible, program_responsible, institute_responsible, year_graduate_responsible เป็นข้อมูลจากตารางของอาจารย์ผู้รับผิดชอบหลักสูตรและอาจารย์ประจำหลักสูตร บางทีอาจมีอาจารย์ท่านอื่นด้วย แต่เอาเฉพาะอาจารย์ผู้รับผิดชอบ โดยqualification_responsible ตำแหน่งทางวิชาการ,name_responsible ชื่อ - สกุล, degree_reponsible คุณวุฒิ, program_responsible สาขาวิชา, institute_responsible สถาบัน, year_graduate_responsible ปีพ.ศ. เอามาแค่เลข
@@ -748,6 +831,13 @@ def main():
         info_data["pdf id"] = pdf_id
         info_data["faculty"] = row.get("faculty", "")
 
+        # 🔹 base_row สำหรับ sheet อื่น ๆ ที่ "ไม่เอา docx id / pdf id"
+        base_row_no_ids = {
+            k: v
+            for k, v in row.items()
+            if k.strip().lower().replace("_", " ") not in {"docx id", "pdf id"}
+        }
+
         # buffer สำหรับแต่ละชนิดในแถวนี้
         plo_values_for_row: List[List[Any]] = []
         qual_values_for_row: List[List[Any]] = []
@@ -788,7 +878,7 @@ def main():
                             continue
                         row_values = make_row_from_item(
                             headers=plo_headers,
-                            base_row=row,  # มี curriculum/docx id/pdf id อยู่ -> map ไปชีท plo ได้ถ้ามี header ชื่อนี้
+                            base_row=base_row_no_ids,  # ✅ เปลี่ยนมาใช้ base_row_no_ids
                             item=plo_item,
                             extra={"row_index": row_idx, "row_idx": row_idx},
                         )
@@ -835,7 +925,7 @@ def main():
                             continue
                         row_values = make_row_from_item(
                             headers=qual_headers,
-                            base_row=row,  # ใช้ base_row เพื่อ map curriculum/docx id/pdf id เช่นกัน
+                            base_row=base_row_no_ids,  # ✅ ใช้ base_row_no_ids
                             item=q,
                             extra={"row_index": row_idx, "row_idx": row_idx},
                         )
@@ -864,10 +954,11 @@ def main():
             for item in combined_courses:
                 row_values = make_row_from_item(
                     headers=course_headers,
-                    base_row=row,  # map curriculum/docx id/pdf id ไปด้วย
+                    base_row=base_row_no_ids,  # ✅ ใช้ base_row_no_ids
                     item=item,
                     extra={"row_index": row_idx, "row_idx": row_idx},
                 )
+
                 course_values_for_row.append(row_values)
 
             if course_values_for_row:
