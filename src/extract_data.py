@@ -342,6 +342,21 @@ def normalize_course_abv(code: Any, lang: str) -> str:
     return f"{letters} {digits}"
 
 
+def add_dot_after_th_letter(abv: str) -> str:
+    if not abv:
+        return abv
+
+    s = abv.strip()
+
+    # กลุ่มตัวอักษร (ไทย/อังกฤษ) ตามด้วยเลข
+    # รองรับทั้ง "ก 1", "ก1", "ก.1", "บช 101" ฯลฯ
+    s = re.sub(
+        r'^([A-Za-z\u0E00-\u0E7F]+)\s*\.?\s*(\d+)\b',
+        r'\1. \2',
+        s
+    )
+    return s
+
 def normalize_course_item_abv(item: Dict[str, Any]) -> Dict[str, Any]:
     """
     รับ dict ของรายวิชา 1 ตัว
@@ -353,6 +368,8 @@ def normalize_course_item_abv(item: Dict[str, Any]) -> Dict[str, Any]:
 
     if "th_abv" in item and item["th_abv"]:
         item["th_abv"] = normalize_course_abv(item["th_abv"], "th")
+        # ✅ เติมจุดหลังอักษร เมื่อเจอแพทเทิร์น อักษร+เลข
+        item["th_abv"] = add_dot_after_th_letter(item["th_abv"])
 
     if "eng_abv" in item and item["eng_abv"]:
         item["eng_abv"] = normalize_course_abv(item["eng_abv"], "en")

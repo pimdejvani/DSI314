@@ -5,6 +5,7 @@ import pandas as pd
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 import streamlit as st
 from streamlit_pdf_viewer import pdf_viewer
 
@@ -271,6 +272,682 @@ def download_pdf_bytes(file_id: str) -> bytes:
     return fh.getvalue()
 
 
+
+# cache sheetId ไว้ใน session_state เพื่อลดการเรียก API ซ้ำ
+def get_sheet_id(sheet_name: str) -> int:
+    if "sheet_id_cache" not in st.session_state:
+        st.session_state["sheet_id_cache"] = {}
+
+    cache = st.session_state["sheet_id_cache"]
+    if sheet_name in cache:
+        return cache[sheet_name]
+
+    # service_spread = build(...).spreadsheets() แล้ว
+    meta = service_spread.get(spreadsheetId=SPREADSHEET_ID).execute()
+    for s in meta.get("sheets", []):
+        props = s.get("properties", {})
+        if props.get("title") == sheet_name:
+            sheet_id = props["sheetId"]
+            cache[sheet_name] = sheet_id
+            return sheet_id
+
+    raise RuntimeError(f"ไม่พบ sheet ชื่อ {sheet_name}")
+
+
+def insert_rows(sheet_name: str, start_row_1_based: int, n_rows: int):
+    """
+    แทรกแถวว่าง n_rows แถวที่ตำแหน่ง start_row_1_based (1-based, ทั้งแถว A:ZZ)
+    """
+    if n_rows <= 0:
+        return
+
+    sheet_id = get_sheet_id(sheet_name)
+
+    requests = [
+        {
+            "insertDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": start_row_1_based - 1,                 # 0-based
+                    "endIndex": start_row_1_based - 1 + n_rows,
+                },
+                "inheritFromBefore": True,
+            }
+        }
+    ]
+
+    service_spread.batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests},
+    ).execute()
+
+def save_plo_changes(curriculum_key: str, edited_plo: list[dict]):
+    """
+    เขียนข้อมูล PLO กลับไปที่ชีต 'plo'
+
+    - แก้ไขเฉพาะฟิลด์ที่มี *_update = True
+    - แถวใหม่ (is_new=True) จะถูกแทรกต่อท้ายกลุ่มของ curriculum นี้
+    - ถ้า delete=True → ลบทั้งแถวออกจากชีต (deleteDimension)
+    """
+    if not curriculum_key:
+        st.warning("ไม่มี curriculum_key สำหรับ save PLO")
+        return
+
+    # โหลด sheet สด
+    df = load_plo_data()
+    if df.empty or "curriculum" not in df.columns:
+        st.error("โหลดชีต 'plo' ไม่ได้ หรือไม่มีคอลัมน์ curriculum")
+        return
+
+    cur_series = df["curriculum"].astype(str).str.strip()
+    cur_key = str(curriculum_key).strip()
+    mask = cur_series == cur_key
+
+    idx_list = [i for i, ok in enumerate(mask) if ok]
+
+    if idx_list:
+        first_idx = idx_list[0]
+        last_idx = idx_list[-1]
+    else:
+        first_idx = None
+        last_idx = None
+
+    header = list(df.columns)
+
+    # ---------- 1) UPDATE + เก็บ index ที่ต้องลบ ----------
+    value_updates = []
+    delete_indices: list[int] = []
+
+    for item in edited_plo:
+        if item.get("is_new"):
+            # แถวใหม่ ยังไม่มีในชีต → ไปจัดการตอน INSERT
+            continue
+
+        row_pos = item.get("row_pos")
+        if row_pos is None or first_idx is None:
+            continue
+
+        df_index = first_idx + int(row_pos)
+        if df_index < 0 or df_index >= len(df):
+            continue
+
+        if str(df.iloc[df_index]["curriculum"]).strip() != cur_key:
+            # curriculum ไม่ตรง → ข้าม (กันเคส concurrency)
+            continue
+
+        if item.get("delete"):
+            # mark ไว้ว่าจะแถวนี้ทั้งแถวออก
+            delete_indices.append(df_index)
+            continue
+
+        # กรณีแก้ไขธรรมดา
+        row = df.iloc[df_index].copy()
+
+        if item.get("type_plo_update"):
+            row["type_plo"] = item.get("type_plo", "")
+
+        if item.get("num_plo_update"):
+            row["num_plo"] = item.get("num_plo", "")
+
+        if item.get("detail_plo_update"):
+            row["detail_plo"] = item.get("detail_plo", "")
+
+        sheet_row = df_index + 3  # df index 0 → row 3
+
+        row_values = [str(row.get(col, "")) for col in header]
+
+        value_updates.append(
+            {
+                "range": f"{PLO_SHEET_NAME}!B{sheet_row}",
+                "values": [row_values],
+            }
+        )
+
+    # commit updates แถวเดิม (ยกเว้นแถวที่จะลบ)
+    if value_updates:
+        body = {
+            "valueInputOption": "USER_ENTERED",
+            "data": value_updates,
+        }
+        service_spread.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body=body,
+        ).execute()
+
+    # ลบแถวที่ถูก mark delete
+    if delete_indices:
+        delete_rows(PLO_SHEET_NAME, delete_indices)
+
+    # ---------- 2) INSERT แถวใหม่ ----------
+    new_rows = [
+        item for item in edited_plo
+        if item.get("is_new") and not item.get("delete")
+    ]
+
+    if not new_rows:
+        return
+
+    # โหลด df ใหม่หลังจากลบแถวเสร็จแล้ว
+    df2 = load_plo_data()
+    if df2.empty or "curriculum" not in df2.columns:
+        # ไม่มีอะไรเหลือแล้วในชีต แต่อยากเพิ่มแถวใหม่ → แทรกใต้ header ได้เลย
+        cur_series2 = pd.Series([], dtype=str)
+        idx_list2 = []
+    else:
+        cur_series2 = df2["curriculum"].astype(str).str.strip()
+        mask2 = cur_series2 == cur_key
+        idx_list2 = [i for i, ok in enumerate(mask2) if ok]
+
+    if idx_list2:
+        last_idx2 = idx_list2[-1]
+    else:
+        # ไม่มี curriculum นี้แล้ว → แทรกท้ายข้อมูลทั้งหมด
+        last_idx2 = len(df2) - 1
+
+    start_row_1_based = last_idx2 + 4  # df index 0 → row3 → ถัดไป row4 = 0+4
+
+    insert_rows(PLO_SHEET_NAME, start_row_1_based, len(new_rows))
+
+    # เติมค่าลงแถวใหม่
+    header2 = list(df2.columns) if not df2.empty else header
+
+    data_for_new = []
+    current_row = start_row_1_based
+
+    for item in new_rows:
+        row_dict = {col: "" for col in header2}
+        row_dict["curriculum"] = cur_key
+        row_dict["type_plo"] = item.get("type_plo", "")
+        row_dict["num_plo"] = item.get("num_plo", "")
+        row_dict["detail_plo"] = item.get("detail_plo", "")
+
+        row_values = [str(row_dict.get(col, "")) for col in header2]
+
+        data_for_new.append(
+            {
+                "range": f"{PLO_SHEET_NAME}!B{current_row}",
+                "values": [row_values],
+            }
+        )
+        current_row += 1
+
+    body_new = {
+        "valueInputOption": "USER_ENTERED",
+        "data": data_for_new,
+    }
+
+    service_spread.values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body=body_new,
+    ).execute()
+
+def save_qualification_changes(curriculum_key: str, edited_qual: list[dict]):
+    """
+    เขียนข้อมูลกลับไปที่ชีต 'qualification_responsible' (QUAL_SHEET_NAME)
+
+    - แก้ไขเฉพาะฟิลด์ที่มี *_update = True
+    - แถวใหม่ (is_new=True) จะถูกแทรกต่อท้ายกลุ่มของ curriculum นี้
+    - ถ้า delete=True → ลบแถวออกจากชีตจริง
+    """
+    if not curriculum_key:
+        st.warning("ไม่มี curriculum_key สำหรับ save qualification")
+        return
+
+    df = load_qualification_data()
+    if df.empty or "curriculum" not in df.columns:
+        st.error("โหลดชีต 'qualification_responsible' ไม่ได้ หรือไม่มีคอลัมน์ curriculum")
+        return
+
+    cur_key = str(curriculum_key).strip()
+    cur_series = df["curriculum"].astype(str).str.strip()
+    mask = cur_series == cur_key
+
+    idx_list = [i for i, ok in enumerate(mask) if ok]
+
+    if idx_list:
+        first_idx = idx_list[0]
+        last_idx = idx_list[-1]
+    else:
+        first_idx = None
+        last_idx = None
+
+    header = list(df.columns)
+
+    value_updates = []
+    delete_indices: list[int] = []
+
+    # ---------- 1) UPDATE + เก็บ index สำหรับลบ ----------
+    for item in edited_qual:
+        if item.get("is_new"):
+            continue
+
+        row_pos = item.get("row_pos")
+        if row_pos is None or first_idx is None:
+            continue
+
+        df_index = first_idx + int(row_pos)
+        if df_index < 0 or df_index >= len(df):
+            continue
+
+        if str(df.iloc[df_index]["curriculum"]).strip() != cur_key:
+            continue
+
+        if item.get("delete"):
+            delete_indices.append(df_index)
+            continue
+
+        row = df.iloc[df_index].copy()
+
+        if item.get("qualification_responsible_update"):
+            row["qualification_responsible"] = item.get("qualification_responsible", "")
+
+        if item.get("name_responsible_update"):
+            row["name_responsible"] = item.get("name_responsible", "")
+
+        if item.get("degree_reponsible_update"):
+            row["degree_reponsible"] = item.get("degree_reponsible", "")
+
+        if item.get("program_responsible_update"):
+            row["program_responsible"] = item.get("program_responsible", "")
+
+        if item.get("institute_responsible_update"):
+            row["institute_responsible"] = item.get("institute_responsible", "")
+
+        if item.get("year_graduate_responsible_update"):
+            row["year_graduate_responsible"] = item.get("year_graduate_responsible", "")
+
+        sheet_row = df_index + 3  # df index 0 → row3
+
+        row_values = [str(row.get(col, "")) for col in header]
+
+        value_updates.append(
+            {
+                "range": f"{QUAL_SHEET_NAME}!B{sheet_row}",
+                "values": [row_values],
+            }
+        )
+
+    if value_updates:
+        body = {
+            "valueInputOption": "USER_ENTERED",
+            "data": value_updates,
+        }
+        service_spread.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body=body,
+        ).execute()
+
+    if delete_indices:
+        delete_rows(QUAL_SHEET_NAME, delete_indices)
+
+    # ---------- 2) INSERT แถวใหม่ ----------
+    new_rows = [
+        item for item in edited_qual
+        if item.get("is_new") and not item.get("delete")
+    ]
+
+    if not new_rows:
+        return
+
+    df2 = load_qualification_data()
+    if df2.empty or "curriculum" not in df2.columns:
+        cur_series2 = pd.Series([], dtype=str)
+        idx_list2 = []
+    else:
+        cur_series2 = df2["curriculum"].astype(str).str.strip()
+        mask2 = cur_series2 == cur_key
+        idx_list2 = [i for i, ok in enumerate(mask2) if ok]
+
+    if idx_list2:
+        last_idx2 = idx_list2[-1]
+    else:
+        last_idx2 = len(df2) - 1
+
+    start_row_1_based = last_idx2 + 4
+    insert_rows(QUAL_SHEET_NAME, start_row_1_based, len(new_rows))
+
+    header2 = list(df2.columns) if not df2.empty else header
+
+    data_for_new = []
+    current_row = start_row_1_based
+
+    for item in new_rows:
+        row_dict = {col: "" for col in header2}
+        row_dict["curriculum"] = cur_key
+        row_dict["qualification_responsible"] = item.get("qualification_responsible", "")
+        row_dict["name_responsible"] = item.get("name_responsible", "")
+        row_dict["degree_reponsible"] = item.get("degree_reponsible", "")
+        row_dict["program_responsible"] = item.get("program_responsible", "")
+        row_dict["institute_responsible"] = item.get("institute_responsible", "")
+        row_dict["year_graduate_responsible"] = item.get("year_graduate_responsible", "")
+
+        row_values = [str(row_dict.get(col, "")) for col in header2]
+
+        data_for_new.append(
+            {
+                "range": f"{QUAL_SHEET_NAME}!B{current_row}",
+                "values": [row_values],
+            }
+        )
+        current_row += 1
+
+    body_new = {
+        "valueInputOption": "USER_ENTERED",
+        "data": data_for_new,
+    }
+
+    service_spread.values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body=body_new,
+    ).execute()
+
+def save_course_changes(curriculum_key: str, edited_course_list: list[dict]):
+    """
+    เขียนข้อมูลรายวิชากลับไปที่ชีต 'course' (COURSE_SHEET_NAME)
+
+    - แก้ไขเฉพาะฟิลด์ที่มี *_update = True
+    - แถวใหม่ (is_new=True) จะถูกแทรกต่อท้ายกลุ่มของ curriculum นี้
+    - ถ้า delete=True → ลบแถวออกจากชีตจริง
+    """
+    if not curriculum_key:
+        st.warning("ไม่มี curriculum_key สำหรับ save course")
+        return
+
+    df = load_course_data()
+    if df.empty or "curriculum" not in df.columns:
+        st.error("โหลดชีต 'course' ไม่ได้ หรือไม่มีคอลัมน์ curriculum")
+        return
+
+    cur_key = str(curriculum_key).strip()
+    cur_series = df["curriculum"].astype(str).str.strip()
+    mask = cur_series == cur_key
+
+    idx_list = [i for i, ok in enumerate(mask) if ok]
+
+    if idx_list:
+        first_idx = idx_list[0]
+        last_idx = idx_list[-1]
+    else:
+        first_idx = None
+        last_idx = None
+
+    header = list(df.columns)
+
+    value_updates = []
+    delete_indices: list[int] = []
+
+    # ---------- 1) UPDATE แถวเดิม + เก็บ index สำหรับลบ ----------
+    for item in edited_course_list:
+        if item.get("is_new"):
+            continue
+
+        row_pos = item.get("row_pos")
+        if row_pos is None or first_idx is None:
+            continue
+
+        df_index = first_idx + int(row_pos)
+        if df_index < 0 or df_index >= len(df):
+            continue
+
+        if str(df.iloc[df_index]["curriculum"]).strip() != cur_key:
+            continue
+
+        if item.get("delete"):
+            delete_indices.append(df_index)
+            continue
+
+        row = df.iloc[df_index].copy()
+
+        if item.get("course_type_id_update"):
+            row["course_type_id"] = item.get("course_type_id", "")
+
+        fields = [
+            "th_abv",
+            "th_name",
+            "eng_abv",
+            "eng_name",
+            "credit",
+            "lect_hours",
+            "practice_hours",
+            "self_hours",
+            "th_desc",
+            "eng_desc",
+            "prerequisite",
+        ]
+
+        for field in fields:
+            flag_name = f"{field}_update"
+            if item.get(flag_name):
+                row[field] = item.get(field, "")
+
+        sheet_row = df_index + 3  # df index 0 → row3
+
+        row_values = [str(row.get(col, "")) for col in header]
+
+        value_updates.append(
+            {
+                "range": f"{COURSE_SHEET_NAME}!B{sheet_row}",
+                "values": [row_values],
+            }
+        )
+
+    if value_updates:
+        body = {
+            "valueInputOption": "USER_ENTERED",
+            "data": value_updates,
+        }
+        service_spread.values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body=body,
+        ).execute()
+
+    if delete_indices:
+        delete_rows(COURSE_SHEET_NAME, delete_indices)
+
+    # ---------- 2) INSERT แถวใหม่ ----------
+    new_rows = [
+        item for item in edited_course_list
+        if item.get("is_new") and not item.get("delete")
+    ]
+
+    if not new_rows:
+        return
+
+    df2 = load_course_data()
+    if df2.empty or "curriculum" not in df2.columns:
+        cur_series2 = pd.Series([], dtype=str)
+        idx_list2 = []
+    else:
+        cur_series2 = df2["curriculum"].astype(str).str.strip()
+        mask2 = cur_series2 == cur_key
+        idx_list2 = [i for i, ok in enumerate(mask2) if ok]
+
+    if idx_list2:
+        last_idx2 = idx_list2[-1]
+    else:
+        last_idx2 = len(df2) - 1
+
+    start_row_1_based = last_idx2 + 4
+    insert_rows(COURSE_SHEET_NAME, start_row_1_based, len(new_rows))
+
+    header2 = list(df2.columns) if not df2.empty else header
+
+    data_for_new = []
+    current_row = start_row_1_based
+
+    for item in new_rows:
+        row_dict = {col: "" for col in header2}
+        row_dict["curriculum"] = cur_key
+        row_dict["course_type_id"] = item.get("course_type_id", "")
+
+        fields = [
+            "th_abv",
+            "th_name",
+            "eng_abv",
+            "eng_name",
+            "credit",
+            "lect_hours",
+            "practice_hours",
+            "self_hours",
+            "th_desc",
+            "eng_desc",
+            "prerequisite",
+        ]
+
+        for field in fields:
+            row_dict[field] = item.get(field, "")
+
+        row_values = [str(row_dict.get(col, "")) for col in header2]
+
+        data_for_new.append(
+            {
+                "range": f"{COURSE_SHEET_NAME}!B{current_row}",
+                "values": [row_values],
+            }
+        )
+        current_row += 1
+
+    body_new = {
+        "valueInputOption": "USER_ENTERED",
+        "data": data_for_new,
+    }
+
+    service_spread.values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body=body_new,
+    ).execute()
+
+def save_information_changes(
+    curriculum_key: str,
+    edited_info: dict | None = None,
+    edited_course_info: dict | None = None,
+    mark_finish_info: bool = False,
+    mark_finish_course: bool = False,
+):
+    """
+    อัปเดตแถวในชีต 'information' (SHEET_NAME) สำหรับ curriculum หนึ่งตัว
+
+    - ใช้คีย์หลักคือคอลัมน์ 'curriculum'
+    - ใช้ค่าใน edited_info / edited_course_info เฉพาะที่มี "update": True
+    - ถ้า mark_finish_info=True → เซ็ต finish_info = 1
+    - ถ้า mark_finish_course=True → เซ็ต finish_course = 1
+    """
+    if not curriculum_key:
+        st.warning("ไม่มี curriculum_key สำหรับ save information")
+        return
+
+    df = load_curriculum_data()
+    if df.empty:
+        st.error("โหลดชีต 'information' ไม่ได้")
+        return
+
+    cur_key = str(curriculum_key).strip()
+
+    # ใช้คอลัมน์ 'curriculum' เป็นตัวระบุตำแหน่งแถว
+    if "curriculum" not in df.columns:
+        st.error("ไม่พบคอลัมน์ 'curriculum' ในชีต information")
+        return
+
+    cur_series = df["curriculum"].astype(str).str.strip()
+    mask = cur_series == cur_key
+    idx_list = [i for i, ok in enumerate(mask) if ok]
+
+    if not idx_list:
+        st.error(f"ไม่พบแถวในชีต information สำหรับ curriculum = {curriculum_key}")
+        return
+
+    # ถ้ามีหลายแถว ใช้แถวแรกเป็นหลัก (ปกติควรมีแถวเดียว)
+    df_index = idx_list[0]
+
+    row = df.iloc[df_index].copy()
+
+    # helper ฟังก์ชัน apply จาก dict {"col": {"value": .., "update": True/False}}
+    def apply_updates(row_series, info_dict: dict | None):
+        if not info_dict:
+            return row_series
+        for col, meta in info_dict.items():
+            if not isinstance(meta, dict):
+                continue
+            if not meta.get("update"):
+                continue
+            # เฉพาะคอลัมน์ที่มีจริงใน df
+            if col in row_series.index:
+                row_series[col] = meta.get("value", "")
+        return row_series
+
+    # 1) อัปเดตฟิลด์จาก information mode
+    row = apply_updates(row, edited_info)
+
+    # 2) อัปเดตฟิลด์จาก course summary (max_semester / credits ฯลฯ)
+    row = apply_updates(row, edited_course_info)
+
+    # 3) เซ็ต finish flag ถ้าต้องการ
+    if mark_finish_info and "finish_info" in row.index:
+        row["finish_info"] = 1
+
+    if mark_finish_course and "finish_course" in row.index:
+        row["finish_course"] = 1
+
+    header = list(df.columns)
+    row_values = [str(row.get(col, "")) for col in header]
+
+    # df index 0 → แถว B3 (เพราะ header อยู่ B2)
+    sheet_row = df_index + 3
+
+    body = {
+        "valueInputOption": "USER_ENTERED",
+        "data": [
+            {
+                "range": f"{SHEET_NAME}!B{sheet_row}",
+                "values": [row_values],
+            }
+        ],
+    }
+
+
+    service_spread.values().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body=body,
+    ).execute()
+
+def delete_rows(sheet_name: str, df_indices_to_delete: list[int]):
+    """
+    ลบทั้งแถว (ROWS) ใน sheet_name ตาม index ของ df (0-based ของ DataFrame)
+
+    - df_index 0 → แถวข้อมูลจริงคือ row 3 (เพราะ B2 เป็น header)
+    - Google Sheets ใช้ row index แบบ 0-based (row1 = 0)
+      ดังนั้น row0_based = (df_index + 3) - 1 = df_index + 2
+    """
+    if not df_indices_to_delete:
+        return
+
+    sheet_id = get_sheet_id(sheet_name)
+
+    # ต้องลบจากแถวล่างขึ้นบน เพื่อไม่ให้ index ขยับกระทบแถวที่ยังไม่ลบ
+    requests = []
+    for df_index in sorted(df_indices_to_delete, reverse=True):
+        row_start_0_based = df_index + 2   # df_index 0 → row3 → 0-based = 2
+
+        requests.append(
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": row_start_0_based,
+                        "endIndex": row_start_0_based + 1,
+                    }
+                }
+            }
+        )
+
+    service_spread.batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests},
+    ).execute()
+
+
 # ================== STREAMLIT UI ==================
 
 st.title("Curriculum QA")
@@ -316,6 +993,7 @@ x1_status = st.radio(
     horizontal=True,
     key="x1_status",
 )
+
 
 finish_info_int = pd.to_numeric(df["finish_info"], errors="coerce").fillna(0).astype(int)
 finish_course_int = pd.to_numeric(df["finish_course"], errors="coerce").fillna(0).astype(int)
@@ -460,8 +1138,12 @@ st.markdown(f"**ผลการค้นหา pdf id:** `{pdf_id}`")
 st.markdown("---")
 
 # ===== X2: เลือกโหมดแก้ไขตามสถานะ finish =====
-finish_info_val = int(pd.to_numeric(row.get("finish_info", 0), errors="coerce") or 0)
-finish_course_val = int(pd.to_numeric(row.get("finish_course", 0), errors="coerce") or 0)
+raw_finish_info = pd.to_numeric(row.get("finish_info", 0), errors="coerce")
+finish_info_val = int(0 if pd.isna(raw_finish_info) else raw_finish_info)
+
+raw_finish_course = pd.to_numeric(row.get("finish_course", 0), errors="coerce")
+finish_course_val = int(0 if pd.isna(raw_finish_course) else raw_finish_course)
+
 
 x2_options = []
 if finish_info_val == 0:
@@ -577,14 +1259,16 @@ with right_col:
 
                 curriculum_key = row.get("curriculum", "")
 
-                # ==== เตรียม PLO / Qualification ====
+                # ===== เตรียมข้อมูล PLO =====
                 plo_rows = pd.DataFrame()
                 if curriculum_key and not plo_df.empty and "curriculum" in plo_df.columns:
                     mask_plo = (
                         plo_df["curriculum"].astype(str).str.strip()
                         == str(curriculum_key).strip()
                     )
-                    plo_rows = plo_df[mask_plo].reset_index(drop=False)
+                    # index ใหม่ 0..N-1 สำหรับ curriculum นี้
+                    plo_rows = plo_df[mask_plo].copy().reset_index(drop=True)
+
 
                 qual_rows = pd.DataFrame()
                 if curriculum_key and not qual_df.empty and "curriculum" in qual_df.columns:
@@ -592,7 +1276,9 @@ with right_col:
                         qual_df["curriculum"].astype(str).str.strip()
                         == str(curriculum_key).strip()
                     )
-                    qual_rows = qual_df[mask_qual].reset_index(drop=False)
+                    # ให้ index เป็น 0..N-1 ภายใน curriculum นี้
+                    qual_rows = qual_df[mask_qual].copy().reset_index(drop=True)
+
 
                 plo_inserted = False
                 qual_inserted = False
@@ -687,7 +1373,8 @@ with right_col:
 
                                         edited_plo.append(
                                             {
-                                                "orig_index": int(plo_row["index"]),
+                                                # ตำแหน่งภายใน curriculum นี้ (0..N-1)
+                                                "row_pos": i,
                                                 "curriculum": curriculum_key,
 
                                                 "type_plo": type_val,
@@ -738,7 +1425,7 @@ with right_col:
 
                                     edited_plo.append(
                                         {
-                                            "orig_index": None,
+                                            "row_pos": None,   # หรือจะลบ key นี้ทิ้งก็ได้
                                             "curriculum": curriculum_key,
 
                                             "type_plo": type_val,
@@ -833,7 +1520,7 @@ with right_col:
 
                                         edited_qual.append(
                                             {
-                                                "orig_index": int(q_row["index"]),
+                                                "row_pos": i,   # 👈 ตำแหน่งใน curriculum นี้
                                                 "curriculum": curriculum_key,
 
                                                 "qualification_responsible": qual_val,
@@ -854,7 +1541,6 @@ with right_col:
                                                 "delete": delete_flag,
                                             }
                                         )
-                                        st.markdown("---")
 
 
                             # ===== ผู้รับผิดชอบใหม่ =====
@@ -909,7 +1595,7 @@ with right_col:
 
                                     edited_qual.append(
                                         {
-                                            "orig_index": None,
+                                            "row_pos": None,   # หรือจะลบ key นี้ออกก็ได้
                                             "curriculum": curriculum_key,
 
                                             "qualification_responsible": qual_val,
@@ -930,7 +1616,7 @@ with right_col:
                                             "delete": False,
                                         }
                                     )
-                                    st.markdown("---")
+
 
 
                         qual_inserted = True
@@ -971,19 +1657,28 @@ with right_col:
 
 
         if submit_info:
-            st.success("บันทึก (ตัวอย่าง – โหมด information, ยังไม่ได้เขียนกลับ Google Sheet จริง)")
-            st.json(
-                {
-                    "mode": "information",
-                    "faculty": active_fac,
-                    "degree_full_th": active_deg,
-                    "pdf_id": pdf_id,
-                    "edited_information": edited_info,
-                    "edited_plo": edited_plo,
-                    "edited_qual": edited_qual,
-                    "finish_info_new_value": 1,
-                }
-            )
+            try:
+                save_information_changes(
+                    curriculum_key=curriculum_key,
+                    edited_info=edited_info,
+                    edited_course_info=None,
+                    mark_finish_info=True,
+                    mark_finish_course=False,
+                )
+
+                if edited_plo:
+                    save_plo_changes(curriculum_key, edited_plo)
+
+                if edited_qual:
+                    save_qualification_changes(curriculum_key, edited_qual)
+
+                # 👇 บอกให้รอบถัดไปเคลียร์ state การค้นหา
+                st.session_state.reset_after_save = True
+                st.experimental_rerun()
+
+            except Exception as e:
+                st.error(f"บันทึกไม่สำเร็จ (information): {e}")
+
 
 
 
@@ -1056,7 +1751,9 @@ with right_col:
                         course_df["curriculum"].astype(str).str.strip()
                         == str(curriculum_key).strip()
                     )
-                    course_rows = course_df[mask_course].reset_index(drop=False)
+                    # index 0..N-1 เฉพาะวิชาใน curriculum นี้
+                    course_rows = course_df[mask_course].copy().reset_index(drop=True)
+
 
                 # ==== ฟอร์มพิเศษสำหรับกำหนดชื่อประเภทของ "อื่นๆ" ====
                 STANDARD_TYPES = ["วิชาศึกษาทั่วไป", "วิชาเฉพาะ", "วิชาเลือกเสรี"]
@@ -1108,7 +1805,7 @@ with right_col:
                             st.markdown(f"**รายวิชาเดิม #{i+1}**")
 
                             edited_one = {
-                                "orig_index": int(c_row["index"]),
+                                "row_pos": i,  # 👈
                                 "curriculum": curriculum_key,
                             }
 
@@ -1216,7 +1913,7 @@ with right_col:
                             edited_one["delete"] = delete_flag
 
                             edited_course_list.append(edited_one)
-                            st.markdown("---")
+
 
                 # ===== รายวิชาใหม่ =====
                 if new_course_count > 0:
@@ -1227,7 +1924,7 @@ with right_col:
                         st.markdown(f"**รายวิชาใหม่ #{j+1}**")
 
                         new_course = {
-                            "orig_index": None,
+                            "row_pos": None,   # หรือไม่ใส่ก็ได้
                             "curriculum": curriculum_key,
                         }
 
@@ -1328,16 +2025,22 @@ with right_col:
             )
 
         if submit_course:
-            st.success("บันทึก (ตัวอย่าง) – โหมด course, ยังไม่ได้เขียนกลับ Google Sheet จริง")
-            st.json(
-                {
-                    "mode": "course",
-                    "faculty": active_fac,
-                    "degree_full_th": active_deg,
-                    "pdf_id": pdf_id,
-                    "edited_course_info": edited_course_info,
-                    "edited_course_list": edited_course_list,
-                    "finish_course_new_value": 1,
-                }
-            )
+            try:
+                save_information_changes(
+                    curriculum_key=curriculum_key,
+                    edited_info=None,
+                    edited_course_info=edited_course_info,
+                    mark_finish_info=False,
+                    mark_finish_course=True,
+                )
+
+                if edited_course_list:
+                    save_course_changes(curriculum_key, edited_course_list)
+
+                st.session_state.reset_after_save = True
+                st.experimental_rerun()
+
+            except Exception as e:
+                st.error(f"บันทึกไม่สำเร็จ (course): {e}")
+
 
