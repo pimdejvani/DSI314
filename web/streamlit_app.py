@@ -129,29 +129,10 @@ def editable_field(
 
     return new_val, want_update
 
+
+
 # ================== DATA LAYER: READ SHEET ==================
-def load_curriculum_data_title() -> pd.DataFrame:
-    """
-    ดึงเฉพาะคอลัมน์ที่ใช้สำหรับ X1 / search bar:
-    finish_info, finish_course, faculty, degree_full_th
-    """
-    df_full = load_curriculum_data()
-    if df_full.empty:
-        return df_full
 
-    cols = ["finish_info", "finish_course", "faculty", "degree_full_th"]
-    existing = [c for c in cols if c in df_full.columns]
-
-    # กัน error ถ้าขาดคอลัมน์อะไรไป
-    if len(existing) < len(cols):
-        missing = [c for c in cols if c not in df_full.columns]
-        st.error(f"ในชีต 'information' ขาดคอลัมน์ (สำหรับ df_title): {missing}")
-        return pd.DataFrame()
-
-    # สำคัญ: ไม่ reset_index → index ตรงกับ df_full
-    return df_full[existing]
-
-@st.cache_data(show_spinner=True)
 def load_curriculum_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         st.error("ไม่ได้ตั้งค่า SPREADSHEET_ID ใน environment variable")
@@ -184,7 +165,7 @@ def load_curriculum_data() -> pd.DataFrame:
     df = pd.DataFrame(normalized_rows, columns=header)
     return df
 
-@st.cache_data(show_spinner=True)
+
 def load_plo_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         return pd.DataFrame()
@@ -215,7 +196,7 @@ def load_plo_data() -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-@st.cache_data(show_spinner=True)
+
 def load_qualification_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         return pd.DataFrame()
@@ -246,7 +227,7 @@ def load_qualification_data() -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
-@st.cache_data(show_spinner=True)
+
 def load_course_data() -> pd.DataFrame:
     if not SPREADSHEET_ID:
         return pd.DataFrame()
@@ -971,18 +952,11 @@ def delete_rows(sheet_name: str, df_indices_to_delete: list[int]):
 
 st.title("Curriculum QA")
 
-if st.session_state.get("reload_cache", False):
-    st.cache_data.clear()              # ล้าง cache ของฟังก์ชันที่ใช้ @st.cache_data ทั้งหมด
-    st.session_state.reload_cache = False
-
 df = load_curriculum_data()
-df_title = load_curriculum_data_title()
-
 plo_df = load_plo_data()
 qual_df = load_qualification_data()
 course_df = load_course_data()
-
-if df.empty or df_title.empty:
+if df.empty:
     st.error("ไม่พบข้อมูลในชีต 'information' หรือโหลดไม่สำเร็จ")
     st.stop()
 
@@ -1008,13 +982,7 @@ if "filter_faculty" not in st.session_state:
 
 if "filter_degree" not in st.session_state:
     st.session_state.filter_degree = None
-# 👇 state สำหรับแถบ "Done" ล่างจอ
 
-if "save_done_banner" not in st.session_state:
-    st.session_state.save_done_banner = False
-
-if "save_done_message" not in st.session_state:
-    st.session_state.save_done_message = ""
 # ================== X1: ตัวกรองสถานะการตรวจ ==================
 
 STATUS_OPTIONS = ["ยังไม่ตรวจ", "เสร็จ"]
@@ -1026,19 +994,16 @@ x1_status = st.radio(
     key="x1_status",
 )
 
-finish_info_int = pd.to_numeric(df_title["finish_info"], errors="coerce").fillna(0).astype(int)
-finish_course_int = pd.to_numeric(df_title["finish_course"], errors="coerce").fillna(0).astype(int)
+
+finish_info_int = pd.to_numeric(df["finish_info"], errors="coerce").fillna(0).astype(int)
+finish_course_int = pd.to_numeric(df["finish_course"], errors="coerce").fillna(0).astype(int)
 
 if x1_status == "ยังไม่ตรวจ":
     mask = (finish_info_int == 0) | (finish_course_int == 0)
 else:  # "เสร็จ"
     mask = (finish_info_int == 1) | (finish_course_int == 1)
 
-# ใช้ df_title สำหรับข้อมูลหัวตาราง
-df_title_search = df_title[mask].copy()
-# และใช้ df (เต็ม) สำหรับข้อมูลจริง
 df_search = df[mask].copy()
-
 
 if df_search.empty:
     st.warning("ไม่มีหลักสูตรตามตัวกรองสถานะที่เลือก")
@@ -1046,7 +1011,7 @@ if df_search.empty:
 
 # ================== SEARCH BAR ด้านบน ==================
 
-faculty_series = df_title_search["faculty"].dropna().astype(str).str.strip()
+faculty_series = df_search["faculty"].dropna().astype(str).str.strip()
 faculty_list = sorted(
     [f for f in faculty_series.unique().tolist() if f != ""]
 )
@@ -1087,12 +1052,14 @@ with search_col2:
 
     if fac_ui is not None:
         degree_series = (
-            df_title_search.loc[df_title_search["faculty"] == fac_ui, "degree_full_th"]
+            df_search.loc[df_search["faculty"] == fac_ui, "degree_full_th"]
             .dropna()
             .astype(str)
             .str.strip()
         )
-        degree_list = sorted([d for d in degree_series.unique().tolist() if d != ""])
+        degree_list = sorted(
+            [d for d in degree_series.unique().tolist() if d != ""]
+        )
 
         if degree_list:
             DEG_BOX_HEIGHT = 150
@@ -1140,12 +1107,6 @@ if search_clicked:
         st.session_state.filter_degree = deg_ui
         st.session_state.has_searched = True
 
-        # 👇 สั่งให้รอบถัดไปเคลียร์ cache_data ทั้งหมดก่อนโหลดข้อมูลใหม่
-        st.session_state.reload_cache = True
-
-        # 👇 บังคับให้รันสคริปต์ใหม่อีกรอบทันที
-        st.rerun()
-
 st.markdown("---")
 
 # ========== ถ้ายังไม่กดค้นหา แสดงแค่ส่วน search แล้วจบ ==========
@@ -1159,84 +1120,59 @@ if not st.session_state.has_searched:
 active_fac = st.session_state.filter_faculty
 active_deg = st.session_state.filter_degree
 
-# หาแถวใน df_title_search จาก faculty + degree_full_th
-filtered_title = df_title_search[
-    (df_title_search["faculty"] == active_fac)
-    & (df_title_search["degree_full_th"] == active_deg)
+filtered = df_search[
+    (df_search["faculty"] == active_fac)
+    & (df_search["degree_full_th"] == active_deg)
 ]
 
-if filtered_title.empty:
+if filtered.empty:
     st.warning("ไม่พบข้อมูลที่ตรงกับ faculty + degree_full_th ที่เลือก (ภายใต้ตัวกรอง X1)")
     st.stop()
 
-# ดึง index จริง (ซึ่งตรงกับ df)
-target_index = filtered_title.index[0]
-
-# ใช้ index นี้ไปหยิบแถวเต็มจาก df
-row = df.loc[target_index]
-
+row = filtered.iloc[0]
 pdf_id = row.get("pdf id", "")
 record_id = row.get("curr_id", f"{active_fac}_{active_deg}")
 curriculum_key = row.get("curriculum", "")
 
 st.markdown(f"**ผลการค้นหา pdf id:** `{pdf_id}`")
+st.markdown("---")
 
-# ===== X2: เลือกโหมดแก้ไขตามสถานะ finish และ X1 =====
+# ===== X2: เลือกโหมดแก้ไขตามสถานะ finish =====
 raw_finish_info = pd.to_numeric(row.get("finish_info", 0), errors="coerce")
 finish_info_val = int(0 if pd.isna(raw_finish_info) else raw_finish_info)
 
 raw_finish_course = pd.to_numeric(row.get("finish_course", 0), errors="coerce")
 finish_course_val = int(0 if pd.isna(raw_finish_course) else raw_finish_course)
 
-# ดูว่า X1 ตอนนี้อยู่โหมดไหน
-# x1_status มีอยู่แล้วด้านบน: "ยังไม่ตรวจ" หรือ "เสร็จ"
-
 x2_options = []
 
 if x1_status == "ยังไม่ตรวจ":
-    # โหมดนี้สนใจเฉพาะส่วนที่ยังไม่เสร็จ (0)
+    # โหมดนี้ให้เลือกเฉพาะส่วนที่ยังไม่เสร็จ
     if finish_info_val == 0:
         x2_options.append("information")
     if finish_course_val == 0:
         x2_options.append("course")
 else:  # x1_status == "เสร็จ"
-    # โหมดนี้สนใจเฉพาะส่วนที่เสร็จแล้ว (1)
+    # โหมดนี้ให้เลือกเฉพาะส่วนที่ "เสร็จแล้ว" (ตามที่บอกว่า finish_info / finish_course = 1)
     if finish_info_val == 1:
         x2_options.append("information")
     if finish_course_val == 1:
         x2_options.append("course")
 
+# กันเคสข้อมูลเพี้ยน แต่ปกติใน X1 = "เสร็จ" จะได้ทั้งสองอันอยู่แล้ว
 if not x2_options:
-    # ปกติไม่ควรเกิด ถ้า logic X1 + flag ถูกต้อง
-    st.warning("ไม่มีส่วนที่สถานะตรงกับตัวกรอง X1 ในหลักสูตรนี้")
+    st.error("สถานะ finish ของหลักสูตรนี้ไม่ตรงกับตัวกรอง X1 ที่เลือก")
     st.stop()
 
-# สร้าง label ให้ user เห็นสถานะด้วย (จะเอาหรือไม่เอาก็ได้)
-label_map = {}
-for opt in x2_options:
-    if opt == "information":
-        status_txt = "เสร็จ" if finish_info_val == 1 else "ยังไม่ตรวจ"
-        label = f"information"
-    else:  # "course"
-        status_txt = "เสร็จ" if finish_course_val == 1 else "ยังไม่ตรวจ"
-        label = f"course"
-    label_map[label] = opt
-
-x2_labels = list(label_map.keys())
-
-# default เลือกอันแรกไปเลยก็พอ
-x2_label_selected = st.radio(
-    "เลือกส่วนที่ต้องการตรวจ/แก้ไข",
-    options=x2_labels,
+x2_mode = st.radio(
+    "เลือกส่วนที่ต้องการตรวจ/แก้ไข (X2)",
+    x2_options,
     index=0,
     horizontal=True,
-    key="x2_mode_label",
+    key="x2_mode",
 )
 
-x2_mode = label_map[x2_label_selected]
-
 st.markdown("---")
-
 
 # ================== LAYOUT 40:60 ==================
 
@@ -1745,18 +1681,17 @@ with right_col:
                 if edited_qual:
                     save_qualification_changes(curriculum_key, edited_qual)
 
-                # 👇 เปิดแถบล่างสีแดงว่า Done
+                # ตั้งค่าให้รอบถัดไปโชว์แถบสีแดง
                 st.session_state.save_done_banner = True
-                st.session_state.save_done_message = "Done (information)"
+                st.session_state.save_done_message = "บันทึกข้อมูล information / PLO / ผู้รับผิดชอบเรียบร้อยแล้ว ✅"
 
-                # ถ้าอยากเพิ่มข้อความเขียวบนฟอร์มซ้ำก็ได้
-                st.success("บันทึกโหมด information ลง Google Sheet แล้ว ✅")
+                # ถ้าอยากใช้ reset_after_save ก็ยังเก็บไว้ได้
+                st.session_state.reset_after_save = True
+
+                st.rerun()
 
             except Exception as e:
                 st.error(f"บันทึกไม่สำเร็จ (information): {e}")
-                # ถ้า error ก็ปิดแถบ Done เผื่อเคยเปิดค้าง
-                st.session_state.save_done_banner = False
-
 
 
 
@@ -1904,7 +1839,6 @@ with right_col:
                             else:
                                 default_choice = "อื่นๆ"
 
-                            # radio + checkbox อยู่คนละ column
                             rcol, ecol = st.columns([4, 1])
 
                             with rcol:
@@ -1916,28 +1850,32 @@ with right_col:
                                     key=f"{record_id}_course_{i}_course_type_id_radio",
                                 )
 
-                            # คำนวณค่าใหม่ final_type จาก radio + other_type_label
+                            # === คำนวณค่าใหม่ final_type จาก radio + other_type_label ===
                             if type_choice == "อื่นๆ":
                                 if other_type_label.strip():
-                                    # ถ้ามี label -> ใช้ label เป็นค่าใหม่ (รวมทุกแถวที่เป็น "อื่นๆ")
+                                    # ถ้ามี label -> ใช้ label นี้เป็นค่าใหม่ "เสมอ"
                                     final_type = other_type_label.strip()
                                 else:
-                                    # ไม่มี label -> ใช้ค่าเดิม (อาจว่าง/null หรือค่าอื่น ๆ)
+                                    # ไม่มี label -> ใช้ค่าเดิม
                                     final_type = original_type
                             else:
-                                # เลือกเป็นค่ามาตรฐาน
                                 final_type = type_choice
 
-                            # ถ้าค่าใหม่ไม่เท่าค่าเดิม -> default ให้ติ๊ก "แก้ไข"
-                            default_update_flag = (final_type != original_type)
+                            # ถ้า final_type ต่างจากค่าเดิม แปลว่าจะ "เปลี่ยนค่า" จริง ๆ
+                            must_update = (final_type != original_type)
 
                             with ecol:
+                                # ผูก key กับ other_type_label ด้วย เพื่อให้ Streamlit reset state
                                 course_type_update = st.checkbox(
                                     "แก้ไข",
-                                    key=f"{record_id}_course_{i}_course_type_id_edit",
-                                    value=default_update_flag,
-                                    help="ติ๊กถ้าต้องการให้เขียนทับค่า course_type_id กลับฐานข้อมูล",
+                                    key=f"{record_id}_course_{i}_course_type_id_edit_{other_type_label}",
+                                    value=must_update,
+                                    help="ระบบจะเขียนทับค่า course_type_id ถ้าค่าจริงเปลี่ยนจากเดิม",
                                 )
+
+                            # 👉 ตาม requirement: ถ้าค่าจริงเปลี่ยน ให้บังคับ update ไม่สนใจ checkbox
+                            if must_update:
+                                course_type_update = True
 
                             # แสดงค่าเดิมถ้าไม่ใช่ type มาตรฐาน เผื่อให้ user เห็นว่าเดิมเป็นอะไร
                             if original_type and original_type not in STANDARD_TYPES:
@@ -1946,7 +1884,8 @@ with right_col:
                             edited_one["course_type_id"] = final_type
                             edited_one["course_type_id_choice"] = type_choice
                             edited_one["course_type_id_original"] = original_type
-                            edited_one["course_type_id_update"] = course_type_update  # flag สำหรับเขียนกลับ
+                            edited_one["course_type_id_update"] = course_type_update
+
 
                             # ----- ฟิลด์อื่น ๆ ของรายวิชา -----
                             fields = [
@@ -2116,16 +2055,17 @@ with right_col:
                 if edited_course_list:
                     save_course_changes(curriculum_key, edited_course_list)
 
+                # ตั้งค่าให้รอบถัดไปโชว์แถบสีแดง
                 st.session_state.save_done_banner = True
-                st.session_state.save_done_message = "Done (course)"
+                st.session_state.save_done_message = "บันทึกข้อมูล course เรียบร้อยแล้ว ✅"
 
-                # จะซ้อน st.success() เพิ่มก็ได้เหมือนกัน
-                # st.success("บันทึกโหมด course ลง Google Sheet แล้ว ✅")
+                # ถ้าอยากใช้ reset_after_save ก็ยังเก็บไว้ได้
+                st.session_state.reset_after_save = True
+
+                st.rerun()
 
             except Exception as e:
                 st.error(f"บันทึกไม่สำเร็จ (course): {e}")
-                st.session_state.save_done_banner = False
-
 
     # ===== แถบล่างสีแดงโชว์เมื่อเซฟเสร็จ =====
     if st.session_state.get("save_done_banner", False):
@@ -2164,3 +2104,4 @@ with right_col:
 
         # เคลียร์ flag เพื่อไม่ให้ขึ้นซ้ำในการ rerun ครั้งถัดไป
         st.session_state.save_done_banner = False
+

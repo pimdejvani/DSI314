@@ -24,7 +24,7 @@ SCOPES = [
 ]
 
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-SHEET_NAME = "test"
+SHEET_NAME = "template"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = "gemini-2.5-flash"
