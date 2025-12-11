@@ -9,10 +9,17 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload
 
+import httplib2 
+from google_auth_httplib2 import AuthorizedHttp
+
 from google import genai
 from google.genai import types
 
 from pypdf import PdfReader, PdfWriter  # pip install pypdf
+
+from http.client import IncompleteRead
+from googleapiclient.errors import HttpError
+import time, random
 
 
 # ================= CONFIG =================
@@ -33,37 +40,121 @@ MODEL_NAME = "gemini-2.5-flash"
 creds = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_FILE, scopes=SCOPES
 )
-service_drive = build("drive", "v3", credentials=creds)
-service_spread = build("sheets", "v4", credentials=creds).spreadsheets()
+
+# ✅ ใส่ timeout ให้ HTTP
+authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=120))
+
+service_drive = build("drive", "v3", http=authed_http, cache_discovery=False)
+service_spread = build("sheets", "v4", http=authed_http, cache_discovery=False).spreadsheets()
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 # ================= HELPERS =================
 
+def _download_pdf_file_bytes_with_retry(
+    file_id: str,
+    max_attempts: int = 5,
+    chunksize: int = 4 * 1024 * 1024,  # ✅ แนะนำ 4MB ลดจำนวนรอบ
+    stall_timeout: int = 90,           # ✅ ถ้าไม่คืบหน้าเกิน 90 วิ ให้ถือว่าค้าง
+) -> bytes:
+    """
+    Hybrid downloader:
+    1) try fast path: request.execute()
+    2) fallback: MediaIoBaseDownload with progress + stall timeout
+    """
+    last_err = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            request = service_drive.files().get_media(fileId=file_id)
+
+            # ---------- 1) FAST PATH ----------
+            # สำหรับไฟล์ไม่ใหญ่ (เช่น <40MB) มักเร็วกว่า chunked
+            try:
+                t0 = time.perf_counter()
+                data = request.execute()
+                t1 = time.perf_counter()
+                print(f"✅ Fast download success {file_id} in {t1 - t0:.2f}s")
+                return data
+            except Exception as e_fast:
+                # ไม่ถือเป็นความผิดพลาดสุดท้าย -> ไปลองแบบ chunked
+                print(f"⚠️ Fast path failed for {file_id}: {e_fast}")
+
+            # ---------- 2) CHUNKED FALLBACK ----------
+            fh = BytesIO()
+            downloader = MediaIoBaseDownload(fh, request, chunksize=chunksize)
+
+            done = False
+            last_progress = -1
+            last_progress_time = time.time()
+
+            while not done:
+                status, done = downloader.next_chunk(num_retries=3)
+
+                # ✅ ถ้าได้ status ให้ถือว่า “มีสัญญาณชีวิต”
+                if status:
+                    progress = int(status.progress() * 100)
+
+                    # พิมพ์เฉพาะตอน % เปลี่ยน
+                    if progress != last_progress:
+                        print(f"Downloading {file_id}: {progress}%")
+                        last_progress = progress
+
+                    # อัปเดตเวลาเมื่อมี status ไม่ว่าค่า progress เปลี่ยนหรือไม่
+                    last_progress_time = time.time()
+
+                # ✅ ถ้าไม่มีความคืบหน้า/ไม่มี status นานเกินกำหนด
+                if time.time() - last_progress_time > stall_timeout:
+                    raise TimeoutError(
+                        f"Download stalled > {stall_timeout}s (file_id={file_id})"
+                    )
+
+            print(f"✅ Chunked download success {file_id}")
+            return fh.getvalue()
+
+        except (IncompleteRead, HttpError, OSError, TimeoutError) as e:
+            last_err = e
+            print(f"⚠️ download attempt {attempt} failed for {file_id}: {e}")
+
+            if attempt == max_attempts:
+                raise
+
+            # exponential backoff + jitter
+            sleep_s = min(2 ** attempt, 30) + random.random()
+            time.sleep(sleep_s)
+
+    raise last_err
+
 def download_pdf_pages(
     file_id: str,
     start_page: Optional[int] = None,
     end_page: Optional[int] = None,
 ) -> bytes:
-    request = service_drive.files().get_media(fileId=file_id)
-    fh = BytesIO()
+    """
+    โหลดไฟล์ PDF จาก Google Drive แล้วคืน bytes ของ PDF เฉพาะหน้าที่ต้องการ
+    - start_page / end_page เป็นเลขหน้าแบบ 1-based และ end_page เป็นแบบรวมหน้า
 
-    # เพิ่ม chunksize ให้ใหญ่ขึ้นลดโอกาสหลุด
-    downloader = MediaIoBaseDownload(fh, request, chunksize=1024 * 1024)
+    ✅ behavior:
+    - โหลดทั้งไฟล์ 1 ครั้ง/ไฟล์ด้วย cache
+    - 호출 chunk 1-4 จะไม่โหลดซ้ำ
+    - จะตัดหน้าใหม่ตาม start/end ของแต่ละ chunk
+    """
 
-    done = False
-    while not done:
-        # ให้ตัวไลบรารี retry เอง
-        _, done = downloader.next_chunk(num_retries=5)
+    # 1) โหลดทั้งไฟล์จาก Drive (ใช้ cache ลดการโหลดซ้ำตอนทำ chunk 1-4)
+    if file_id not in _PDF_CACHE:
+        _PDF_CACHE[file_id] = _download_pdf_file_bytes_with_retry(file_id)
 
-    pdf_bytes = fh.getvalue()
+    pdf_bytes = _PDF_CACHE[file_id]
 
+    # ถ้าไม่ได้ระบุหน้าเลย -> คืนทั้งไฟล์
     if start_page is None and end_page is None:
         return pdf_bytes
 
+    # 2) อ่าน PDF แล้วตัดหน้า
     reader = PdfReader(BytesIO(pdf_bytes))
     writer = PdfWriter()
+
     total_pages = len(reader.pages)
 
     if start_page is None:
@@ -85,7 +176,6 @@ def download_pdf_pages(
     output = BytesIO()
     writer.write(output)
     return output.getvalue()
-
 
 
 def to_int_or_none(v):
@@ -778,203 +868,226 @@ SCHEMA_CHUNKS: dict[int, dict[str, Any]] = {
     4: schema_chunk4,
 }
 
+_PDF_CACHE: dict[str, bytes] = {}
 
 # ================= MAIN LOOP =================
 
 def main():
-    # 1) อ่านแถวจากชีท test
+    # 1) อ่านแถวจากชีท template
     rows = read_rows_from_sheet()
     print("rows", rows)
 
-    # 2) header ของชีทปลายทาง (ทุกชีทคอลัมน์แรกอยู่ที่ B2)
+    # 2) header ของชีทปลายทาง
     info_headers = get_sheet_headers("information")
+    print("already info")
     plo_headers = get_sheet_headers("plo")
+    print("already plo")
     course_headers = get_sheet_headers("course")
+    print("already course")
     qual_headers = get_sheet_headers("qualification_responsible")
+    print("already qualification_responsible")
 
     # 3) loop ทีละแถว (1 แถว = 1 หลักสูตร)
-    for row_idx, row in enumerate(rows, start=3):  # row_idx = แถวจริงในชีท (header อยู่ที่แถว 2)
-        print("row_idx", row_idx)
+    for row_idx, row in enumerate(rows, start=3):
+        pdf_id = row.get("pdf id") or row.get("PDF_ID") or ""
 
         # ---------- (1) เลือกเฉพาะแถวที่ already_extract == 0 ----------
         already = str(row.get("already_extract", "")).strip()
         if already != "0":
-            # ถ้าไม่ใช่ 0 แปลว่าเคย extract แล้ว -> ข้าม
             continue
 
-        pdf_id = row.get("pdf id") or row.get("PDF_ID") or ""
         if not pdf_id:
-            # ไม่มี pdf id ก็ข้าม
             continue
 
-        PAGE_START_CHUNKS: Dict[int, Optional[int]] = {
-            1: to_int_or_none(row.get("chunk1_start")),
-            2: to_int_or_none(row.get("chunk2_start")),
-            3: to_int_or_none(row.get("chunk3_start")),
-            4: to_int_or_none(row.get("chunk4_start")),
-        }
-        PAGE_END_CHUNKS: Dict[int, Optional[int]] = {
-            1: to_int_or_none(row.get("chunk1_end")),
-            2: to_int_or_none(row.get("chunk2_end")),
-            3: to_int_or_none(row.get("chunk3_end")),
-            4: to_int_or_none(row.get("chunk4_end")),
-        }
+        row_success = False
 
-        print(f"\n========== ROW {row_idx} pdf_id={pdf_id} ==========\n")
+        try:
+            print(f"\n========== ROW {row_idx} pdf_id={pdf_id} ==========\n")
 
-        # ---------- scalar fields chunk1,2,4 -> information ----------
-        info_data: Dict[str, Any] = {}
+            PAGE_START_CHUNKS: Dict[int, Optional[int]] = {
+                1: to_int_or_none(row.get("chunk1_start")),
+                2: to_int_or_none(row.get("chunk2_start")),
+                3: to_int_or_none(row.get("chunk3_start")),
+                4: to_int_or_none(row.get("chunk4_start")),
+            }
+            PAGE_END_CHUNKS: Dict[int, Optional[int]] = {
+                1: to_int_or_none(row.get("chunk1_end")),
+                2: to_int_or_none(row.get("chunk2_end")),
+                3: to_int_or_none(row.get("chunk3_end")),
+                4: to_int_or_none(row.get("chunk4_end")),
+            }
 
-        # (2) map field จาก template -> sheet information ตามที่ต้องการ
-        info_data["curriculum"] = row.get("curriculum", "")
-        info_data["docx id"] = row.get("docx id", "")
-        info_data["pdf id"] = pdf_id
-        info_data["faculty"] = row.get("faculty", "")
+            # ---------- scalar fields chunk1,2,4 -> information ----------
+            info_data: Dict[str, Any] = {}
 
-        # 🔹 base_row สำหรับ sheet อื่น ๆ ที่ "ไม่เอา docx id / pdf id"
-        base_row_no_ids = {
-            k: v
-            for k, v in row.items()
-            if k.strip().lower().replace("_", " ") not in {"docx id", "pdf id"}
-        }
+            # map field จาก template -> sheet information
+            info_data["curriculum"] = row.get("curriculum", "")
+            info_data["docx id"] = row.get("docx id", "")
+            info_data["pdf id"] = pdf_id
+            info_data["faculty"] = row.get("faculty", "")
 
-        # buffer สำหรับแต่ละชนิดในแถวนี้
-        plo_values_for_row: List[List[Any]] = []
-        qual_values_for_row: List[List[Any]] = []
-        chunk2_courses: List[Dict[str, Any]] = []
-        chunk3_courses: List[Dict[str, Any]] = []
+            # base_row สำหรับ sheet อื่น ๆ ที่ "ไม่เอา docx id / pdf id"
+            base_row_no_ids = {
+                k: v
+                for k, v in row.items()
+                if k.strip().lower().replace("_", " ") not in {"docx id", "pdf id"}
+            }
 
-        # 4) รัน chunk 1–4
-        for chunk_no in range(1, 5):
-            prompt = CONTENT_CHUNKS[chunk_no]
-            schema = SCHEMA_CHUNKS[chunk_no]
-            start = PAGE_START_CHUNKS[chunk_no]
-            end = PAGE_END_CHUNKS[chunk_no]
+            # buffer สำหรับแต่ละชนิดในแถวนี้
+            plo_values_for_row: List[List[Any]] = []
+            qual_values_for_row: List[List[Any]] = []
+            chunk2_courses: List[Dict[str, Any]] = []
+            chunk3_courses: List[Dict[str, Any]] = []
 
-            pdf_bytes = download_pdf_pages(pdf_id, start, end)
+            # ---------- (2) รัน chunk 1–4 ----------
+            for chunk_no in range(1, 5):
+                prompt = CONTENT_CHUNKS[chunk_no]
+                schema = SCHEMA_CHUNKS[chunk_no]
+                start = PAGE_START_CHUNKS[chunk_no]
+                end = PAGE_END_CHUNKS[chunk_no]
 
-            result = call_gemini_with_file_and_schema(
-                file_bytes=pdf_bytes,
-                prompt=prompt,
-                schema=schema,
-            )
+                print(f"process download pdf for chunk {chunk_no} ...")
+                pdf_bytes = download_pdf_pages(pdf_id, start, end)
 
-            print(f"--- chunk {chunk_no} result ---")
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            print()
-
-            if chunk_no == 1:
-                # scalar -> info_data
-                for k, v in result.items():
-                    if k == "plo":
-                        continue
-                    info_data[k] = v
-
-                # plo -> sheet 'plo'
-                plo_list = result.get("plo") or []
-                if isinstance(plo_list, list):
-                    for plo_item in plo_list:
-                        if not isinstance(plo_item, dict):
-                            continue
-                        row_values = make_row_from_item(
-                            headers=plo_headers,
-                            base_row=base_row_no_ids,  # ✅ เปลี่ยนมาใช้ base_row_no_ids
-                            item=plo_item,
-                            extra={"row_index": row_idx, "row_idx": row_idx},
-                        )
-                        plo_values_for_row.append(row_values)
-
-            elif chunk_no == 2:
-                # scalar (ยกเว้น course) -> info_data
-                for k, v in result.items():
-                    if k == "course":
-                        continue
-                    info_data[k] = v
-
-                # course list จาก chunk2
-                c_list = result.get("course") or []
-                if isinstance(c_list, list):
-                    for c in c_list:
-                        if isinstance(c, dict):
-                            # ✅ normalize th_abv / eng_abv ก่อนเก็บ
-                            normalize_course_item_abv(c)
-                            chunk2_courses.append(c)
-
-            elif chunk_no == 3:
-                # course descriptions จาก chunk3
-                c_list = result.get("course") or []
-                if isinstance(c_list, list):
-                    for c in c_list:
-                        if isinstance(c, dict):
-                            # ✅ normalize th_abv / eng_abv ก่อนเก็บ
-                            normalize_course_item_abv(c)
-                            chunk3_courses.append(c)
-
-            elif chunk_no == 4:
-                # scalar (ยกเว้น qualification_responsible) -> info_data
-                for k, v in result.items():
-                    if k == "qualification_responsible":
-                        continue
-                    info_data[k] = v
-
-                # qualification_responsible -> sheet 'qualification_responsible'
-                q_list = result.get("qualification_responsible") or []
-                if isinstance(q_list, list):
-                    for q in q_list:
-                        if not isinstance(q, dict):
-                            continue
-                        row_values = make_row_from_item(
-                            headers=qual_headers,
-                            base_row=base_row_no_ids,  # ✅ ใช้ base_row_no_ids
-                            item=q,
-                            extra={"row_index": row_idx, "row_idx": row_idx},
-                        )
-                        qual_values_for_row.append(row_values)
-
-        # ===== หลังจากครบ 4 chunk ของแถวนี้ =====
-        print(info_data)
-        info_data.setdefault("finish_info", 0)
-        info_data.setdefault("finish_course", 0)
-        
-        # information: เขียนแถว row_idx (ครั้งแรกเท่านั้น เพราะรอบต่อไปโดนกรอง already_extract)
-        write_information_row(row_idx, info_headers, info_data)
-
-        # plo (append เฉพาะของแถวนี้)
-        if plo_values_for_row:
-            append_rows_to_sheet("plo", plo_headers, plo_values_for_row)
-
-        # course: รวม chunk2 + chunk3 ของแถวนี้ แล้ว append
-        if chunk2_courses or chunk3_courses:
-            combined_courses = combine_course_items_for_row(
-                struct_courses=chunk2_courses,
-                desc_courses=chunk3_courses,
-            )
-
-            course_values_for_row: List[List[Any]] = []
-            for item in combined_courses:
-                row_values = make_row_from_item(
-                    headers=course_headers,
-                    base_row=base_row_no_ids,  # ✅ ใช้ base_row_no_ids
-                    item=item,
-                    extra={"row_index": row_idx, "row_idx": row_idx},
+                print(f"process gemini for chunk {chunk_no} ...")
+                result = call_gemini_with_file_and_schema(
+                    file_bytes=pdf_bytes,
+                    prompt=prompt,
+                    schema=schema,
                 )
 
-                course_values_for_row.append(row_values)
+                print(f"--- chunk {chunk_no} result ---")
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                print()
 
-            if course_values_for_row:
-                append_rows_to_sheet("course", course_headers, course_values_for_row)
+                if chunk_no == 1:
+                    # scalar -> info_data
+                    for k, v in result.items():
+                        if k == "plo":
+                            continue
+                        info_data[k] = v
 
-        # qualification_responsible
-        if qual_values_for_row:
-            append_rows_to_sheet(
-                "qualification_responsible",
-                qual_headers,
-                qual_values_for_row,
-            )
+                    # plo -> sheet 'plo'
+                    plo_list = result.get("plo") or []
+                    if isinstance(plo_list, list):
+                        for plo_item in plo_list:
+                            if not isinstance(plo_item, dict):
+                                continue
+                            row_values = make_row_from_item(
+                                headers=plo_headers,
+                                base_row=base_row_no_ids,
+                                item=plo_item,
+                                extra={"row_index": row_idx, "row_idx": row_idx},
+                            )
+                            plo_values_for_row.append(row_values)
 
-        # ---------- (3) mark ว่าแถวนี้ extract เสร็จแล้ว ----------
-        update_already_extract_flag(row_idx, 1)
+                elif chunk_no == 2:
+                    # scalar (ยกเว้น course) -> info_data
+                    for k, v in result.items():
+                        if k == "course":
+                            continue
+                        info_data[k] = v
 
+                    # course list จาก chunk2
+                    c_list = result.get("course") or []
+                    if isinstance(c_list, list):
+                        for c in c_list:
+                            if isinstance(c, dict):
+                                normalize_course_item_abv(c)
+                                chunk2_courses.append(c)
+
+                elif chunk_no == 3:
+                    # course descriptions จาก chunk3
+                    c_list = result.get("course") or []
+                    if isinstance(c_list, list):
+                        for c in c_list:
+                            if isinstance(c, dict):
+                                normalize_course_item_abv(c)
+                                chunk3_courses.append(c)
+
+                elif chunk_no == 4:
+                    # scalar (ยกเว้น qualification_responsible) -> info_data
+                    for k, v in result.items():
+                        if k == "qualification_responsible":
+                            continue
+                        info_data[k] = v
+
+                    # qualification_responsible -> sheet
+                    q_list = result.get("qualification_responsible") or []
+                    if isinstance(q_list, list):
+                        for q in q_list:
+                            if not isinstance(q, dict):
+                                continue
+                            row_values = make_row_from_item(
+                                headers=qual_headers,
+                                base_row=base_row_no_ids,
+                                item=q,
+                                extra={"row_index": row_idx, "row_idx": row_idx},
+                            )
+                            qual_values_for_row.append(row_values)
+
+            # ---------- (3) หลังจากครบ 4 chunk ของแถวนี้ ----------
+            print("final info_data:", info_data)
+
+            info_data.setdefault("finish_info", 0)
+            info_data.setdefault("finish_course", 0)
+
+            # information: เขียนแถว row_idx
+            write_information_row(row_idx, info_headers, info_data)
+
+            # plo (append เฉพาะของแถวนี้)
+            if plo_values_for_row:
+                append_rows_to_sheet("plo", plo_headers, plo_values_for_row)
+
+            # course: รวม chunk2 + chunk3 ของแถวนี้ แล้ว append
+            if chunk2_courses or chunk3_courses:
+                combined_courses = combine_course_items_for_row(
+                    struct_courses=chunk2_courses,
+                    desc_courses=chunk3_courses,
+                )
+
+                course_values_for_row: List[List[Any]] = []
+                for item in combined_courses:
+                    row_values = make_row_from_item(
+                        headers=course_headers,
+                        base_row=base_row_no_ids,
+                        item=item,
+                        extra={"row_index": row_idx, "row_idx": row_idx},
+                    )
+                    course_values_for_row.append(row_values)
+
+                if course_values_for_row:
+                    append_rows_to_sheet("course", course_headers, course_values_for_row)
+
+            # qualification_responsible
+            if qual_values_for_row:
+                append_rows_to_sheet(
+                    "qualification_responsible",
+                    qual_headers,
+                    qual_values_for_row,
+                )
+
+            # ---------- (4) mark ว่าแถวนี้ extract เสร็จแล้ว ----------
+            update_already_extract_flag(row_idx, 1)
+            row_success = True
+
+            print(f"✅ ROW {row_idx} done")
+
+        except Exception as e:
+            print(f"❌ Error on row {row_idx} pdf_id={pdf_id}: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # ไม่ mark already_extract เพื่อให้กลับมารันใหม่ได้
+            # ถ้าคุณอยาก mark ว่า fail ก็ทำคอลัมน์ใหม่ได้ภายหลัง
+
+        finally:
+            # สำคัญ: ล้าง cache เฉพาะไฟล์นี้เมื่อจบแถว
+            if pdf_id:
+                _PDF_CACHE.pop(pdf_id, None)
+
+            if not row_success:
+                print(f"⚠️ ROW {row_idx} not completed, cache cleared, will retry next run")
 
 
 if __name__ == "__main__":

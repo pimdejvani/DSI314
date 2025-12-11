@@ -1,0 +1,98 @@
+{
+  "task": "batch_label_courses",
+  "label_definitions": {
+    "00 Generic programmes and qualifications": "Broad, non-specialised programmes developing basic, general or personal skills; covers a wide range of subjects with little or no field emphasis.",
+    "01 Education": "Teacher training and education science; preparing educators and studying teaching/learning methods, curriculum, and educational systems.",
+    "02 Arts and humanities": "Arts, design, music, performing arts, religion, history, philosophy, and languages/literature; focuses on cultural and creative expression and interpretation.",
+    "03 Social sciences, journalism and information": "Social and behavioural sciences, economics, politics, sociology, journalism, library and information sciences; studies society, people, and communication.",
+    "04 Business, administration and law": "Business and management, accounting, finance, marketing, administration, and legal studies; focuses on organizations, commerce, and regulatory frameworks.",
+    "05 Natural sciences, mathematics and statistics": "Biology, chemistry, physics, earth sciences, mathematics, and statistics; studies natural phenomena, quantitative reasoning, and data methods.",
+    "06 Information and Communication Technologies": "Computer science, software, networks, databases, AI, and ICT applications; focuses on computing systems and digital technologies.",
+    "07 Engineering, manufacturing and construction": "Engineering disciplines, industrial production, materials, architecture/ construction; applies science and technology to design, build, and manufacture.",
+    "08 Agriculture, forestry, fisheries and veterinary": "Crop and animal production, forestry, fisheries, food-related agriculture, and veterinary medicine; manages biological resources and animal health.",
+    "09 Health and welfare": "Medicine, nursing, dentistry, pharmacy, public health, and social care; promotes health, treatment, rehabilitation, and wellbeing.",
+    "10 Services": "Personal, transport, security, environmental, and other service fields including hospitality and tourism; focuses on practical services for individuals and society."
+  },
+  "labels": [
+    "00 Generic programmes and qualifications",
+    "01 Education",
+    "02 Arts and humanities",
+    "03 Social sciences, journalism and information",
+    "04 Business, administration and law",
+    "05 Natural sciences, mathematics and statistics",
+    "06 Information and Communication Technologies",
+    "07 Engineering, manufacturing and construction",
+    "08 Agriculture, forestry, fisheries and veterinary",
+    "09 Health and welfare",
+    "10 Services"
+  ],
+  "courses": [
+    {
+      "eng_abv": "TU151",
+      "eng_name": "General College Mathematics",
+      "eng_desc": "(A non-credit subject to the students' faculty code of 02, 04 and from 09 to 14, 16, 17, 18) Sets, the real number system, relations, functions and applications, introduction to linear programming, logic, measurement of interest, installment payment and income tax, descriptive statistics, index number, introduction to probability, basic concepts of inferential statistics, statistical packages."
+    },
+    {
+      "eng_abv": "TU152",
+      "eng_name": "Fundamental Mathematics",
+      "eng_desc": "(This course is for students who have already studied mathematics in high school and have gained not less than 16 credits or as demanded by their faculty.) Logical rules, methods of proofs for mathematical statements, arguments, mathematical induction, proofs of theorems of inequalities and absolute values, solving inequalities, functions, type of functions, applications of functions, curve sketching, partial fractions decomposition, solving simple systems of linear equations."
+    },
+    {
+      "eng_abv": "ST448",
+      "eng_name": "Mathematics of Financial Derivatives",
+      "eng_desc": "A Simple Market Model; Discrete Time Market Models; Continuous Time Market Models; Forward and Futures Contracts; General Properties of Options; Option Pricing; Hedging; Portfolio Management; Other Interesting Topic."
+    },
+    {
+      "eng_abv": "TU240",
+      "eng_name": "World Geopolitical Economy",
+      "eng_desc": "A Study of the Relationship between Geopolitics, Economy, Relations between Countries in the Region, World Economy, Geopolitical Problems. Economic Superpower, International Conflict and the Economic and Political Policies of the Great Powers that Influence Countries such as using Soft Power Policy, Social Sanction and etc."
+    },
+    {
+      "eng_abv": "ES357",
+      "eng_name": "Soil and Groundwater Pollution",
+      "eng_desc": "A basic fundamental theories and principles of soil and groundwater pollution including chemical biological and physical process, source of pollutants, toxic substances in soil and main components, bio-chemical reactions of toxic substances, transport of toxic substances in soil and transport of toxic substances from soil to groundwater, statistical evaluation, sampling techniques, prevention control and remediation of soil and groundwater pollutant."
+    },
+    {
+      "eng_abv": "SPD317",
+      "eng_name": "Communication for Social Changes",
+      "eng_desc": "A basic grounding in contemporary mass communication theories and models thatlead to effective planning and designing of communication materials used for social change andbehavior change theories and techniques for strategic change, application of knowledge throughan applied research project and integration of communication concepts with on-going projects."
+    },
+    {
+      "eng_abv": "PC346",
+      "eng_name": "Quantum Computing",
+      "eng_desc": "A basic of quantum computer, qubits and quantum gates, quantum circuits, quantum Fourier transform and its applications, quantum algorithms, quantum optimization, error correction and error mitigation, quantum cryptography."
+    },
+    {
+      "eng_abv": "GE436",
+      "eng_name": "Artificial Intelligence (AI) for Social Good",
+      "eng_desc": "A brief history of Al; the fundamentals of Al and Al tools associated with everyday life; data collection and Al development; application of Al techniques for social good for instances, data analytics and predictoin of social, agricultural, and environmental issues; data visualization; effects of Al operation; examples of using Al as case studies."
+    },
+    {
+      "eng_abv": "PC280",
+      "eng_name": "Introduction to Astronomy",
+      "eng_desc": "A brief history of Astronomy, light and astronomical instruments, the Solar System, stars, galaxies, the Universe."
+    },
+    {
+      "eng_abv": "CN210",
+      "eng_name": "Fundamental of Computer Architecture",
+      "eng_desc": "A brief introduction to digital logic. Implementation of arithmetic logic unit. Binary numbers. Representation of negative numbers in a computer. Floating-point numbers. Basic machine instructions for a RISC-type computer. Assembly language programming. Implementations of basic computer under various clocking assumptions. Pipelining. Memory hierarchy: caches and virtual memory. Brief survey of input/output issues."
+    }
+  ],
+  "output_format": {
+    "results": [
+      {
+        "eng_abv": "string",
+        "label": "string or null",
+        "confidence": "number 0-1",
+        "derived_eng_desc1": "string"
+      }
+    ]
+  },
+  "strict": [
+    "Return exactly one result per course in the same order as input.",
+    "Choose label only from the provided labels.",
+    "Use label_definitions to guide your decision.",
+    "derived_eng_desc1 is a short rationale of why you chose the label (<= 20 words).",
+    "If the text is insufficient, set label=null and confidence=0."
+  ]
+}

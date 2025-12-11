@@ -1,13 +1,16 @@
 
 
 google-genai
-python-dotenv
+pypdf==6.4.0
+google-api-python-client==2.187.0
+google-auth==2.41.1
+google-auth-oauthlib==1.2.3
+google-auth-httplib2==0.2.1
+pandas==2.3.3
 
-pypdf
-rapidfuzz
-httpx
+httplib2>=0.22.0
+pydantic>=2,<3
 
-google-api-python-client 
-google-auth 
-google-auth-oauthlib 
-pandas
+
+openai
+requests==2.32.3

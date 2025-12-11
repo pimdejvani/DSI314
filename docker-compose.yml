@@ -12,12 +12,20 @@ services:
       FILE_SEARCH_PATH: "/data:/app/src" 
       ROOT_FOLDER_ID: ${ROOT_FOLDER_ID}
       SPREADSHEET_ID: ${SPREADSHEET_ID}
+      AZURE_OPENAI_BASE_URL: ${AZURE_OPENAI_BASE_URL}
+      AZURE_AI_KEY: ${AZURE_AI_KEY}
+      AZURE_AI_MODEL: ${AZURE_AI_MODEL}
+
+      # optional config
+      PHI_BATCH_SIZE: "10"
+      PHI_WORKERS: "3"
+      PHI_REQUEST_DELAY: "0.5"
+      PHI_BACKOFF_429: "8"
 
     restart : unless-stopped
 
     volumes:
     - ./src:/app/src
-    - ./data:/data
     - ./service_account.json:/app/service_account.json:ro
     command: ["sleep","infinity"]
 
@@ -48,3 +56,28 @@ services:
       - "/app/web/streamlit_app.py"
       - "--server.address=0.0.0.0"
       - "--server.port=8501"
+
+
+  mysql:
+    image: mysql:8.0
+    container_name: curriculum-mysql
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${MYSQL_PORT}:3306"
+    volumes:
+      - ./mySQL/data:/var/lib/mysql
+      - ./mySQL/conf.d:/etc/mysql/conf.d
+      # mount ทั้งโฟลเดอร์ scripts
+      - ./src/sql_scripts:/docker-entrypoint-initdb.d:ro
+
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --local-infile=1
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

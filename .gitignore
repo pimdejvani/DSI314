@@ -1,6 +1,7 @@
 
 service_account.json
-
+mySQL/data
+mySQL/conf.d
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
